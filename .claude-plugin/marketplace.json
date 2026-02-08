@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "maxamillion-agentskill-redhat-contribution-report",
+  "description": "Evaluate Red Hat employee contributions to open source projects using LDAP org traversal and GitHub analysis",
+  "owner": {
+    "name": "Adam Miller",
+    "email": "admiller@redhat.com"
+  },
+  "plugins": [
+    {
+      "name": "redhat-contribution-report",
+      "description": "Evaluates Red Hat contributions to OSS projects across PRs, maintainership, governance, roadmap influence, and leadership roles",
+      "author": {
+        "name": "Adam Miller",
+        "email": "admiller@redhat.com"
+      },
+      "source": "./redhat-contribution-report",
+      "category": "analysis",
+      "homepage": "https://github.com/maxamillion/agentskill-redhat-contribution-report"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "redhat-contribution-report",
+  "description": "Evaluates Red Hat contributions to open source projects using LDAP org traversal and GitHub contribution analysis",
+  "author": {
+    "name": "Adam Miller",
+    "email": "admiller@redhat.com"
+  }
+}

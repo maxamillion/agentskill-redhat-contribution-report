@@ -1,0 +1,144 @@
+{
+  "kpis": {
+    "rh_pr_contributions": {
+      "name": "PR/Commit Contributions",
+      "description": "Pull requests, merge requests, git commits, or other code contributions authored or co-authored by Red Hat employees",
+      "scoring": {
+        "5": {
+          "label": "Dominant contributor",
+          "criteria": "Red Hat employees author >= 30% of merged PRs in the evaluation period"
+        },
+        "4": {
+          "label": "Major contributor",
+          "criteria": "Red Hat employees author 20-29% of merged PRs"
+        },
+        "3": {
+          "label": "Significant contributor",
+          "criteria": "Red Hat employees author 10-19% of merged PRs"
+        },
+        "2": {
+          "label": "Minor contributor",
+          "criteria": "Red Hat employees author 1-9% of merged PRs"
+        },
+        "1": {
+          "label": "No contributions",
+          "criteria": "No Red Hat employee PRs found in the evaluation period"
+        }
+      }
+    },
+    "rh_release_management": {
+      "name": "Release Management",
+      "description": "Release managers responsible for the project's release activities and responsibilities that are Red Hat employees",
+      "scoring": {
+        "5": {
+          "label": "Primary with succession",
+          "criteria": "Red Hat employee is primary release manager with at least one additional RH backup/successor"
+        },
+        "4": {
+          "label": "Primary release manager",
+          "criteria": "Red Hat employee is the primary or sole release manager"
+        },
+        "3": {
+          "label": "One of multiple",
+          "criteria": "Red Hat employee is one of multiple release managers"
+        },
+        "2": {
+          "label": "Release-adjacent",
+          "criteria": "Red Hat employee participates in release activities but is not a named release manager"
+        },
+        "1": {
+          "label": "None",
+          "criteria": "No Red Hat employee involvement in release management identified"
+        }
+      }
+    },
+    "rh_maintainership": {
+      "name": "Maintainer/Reviewer/Approver Roles",
+      "description": "Red Hat employees with maintainer, reviewer, approver, or other contributor authorization authority",
+      "scoring": {
+        "5": {
+          "label": "Broad maintainership",
+          "criteria": ">= 3 Red Hat maintainers/approvers across multiple subsystems or components"
+        },
+        "4": {
+          "label": "Multiple maintainers",
+          "criteria": "2 Red Hat maintainers/approvers in the project"
+        },
+        "3": {
+          "label": "Single maintainer",
+          "criteria": "1 Red Hat maintainer/approver in the project"
+        },
+        "2": {
+          "label": "Reviewer only",
+          "criteria": "Red Hat employees serve as reviewers but not maintainers/approvers"
+        },
+        "1": {
+          "label": "None",
+          "criteria": "No Red Hat employees in any maintainer, reviewer, or approver roles"
+        }
+      }
+    },
+    "rh_roadmap_influence": {
+      "name": "Roadmap Influence",
+      "description": "Roadmap features led by or influenced by Red Hat employees",
+      "scoring": {
+        "5": {
+          "label": "Strategic leadership",
+          "criteria": "Red Hat employees lead multiple roadmap features and participate in strategic planning"
+        },
+        "4": {
+          "label": "Feature leadership",
+          "criteria": "Red Hat employees lead at least 1 major roadmap feature or enhancement"
+        },
+        "3": {
+          "label": "Active contribution",
+          "criteria": "Red Hat employees actively contribute to roadmap features or proposals"
+        },
+        "2": {
+          "label": "Participation",
+          "criteria": "Red Hat employees participate in roadmap discussions but do not lead features"
+        },
+        "1": {
+          "label": "None",
+          "criteria": "No Red Hat employee involvement in roadmap or feature planning identified"
+        }
+      }
+    },
+    "rh_leadership_roles": {
+      "name": "Leadership Roles",
+      "description": "Technical Advisory Council, Advisory Board, Steering Committee, or other governance leadership positions held by Red Hat employees",
+      "scoring": {
+        "5": {
+          "label": "Multiple leadership positions",
+          "criteria": ">= 2 governance positions including at least one chair/lead role held by Red Hat employees"
+        },
+        "4": {
+          "label": "Steering/TAC membership",
+          "criteria": "Red Hat employee holds a seat on the steering committee or Technical Advisory Council"
+        },
+        "3": {
+          "label": "Working group leadership",
+          "criteria": "Red Hat employee leads a working group, SIG, or similar sub-governance body"
+        },
+        "2": {
+          "label": "Working group member",
+          "criteria": "Red Hat employee is a member (not lead) of a working group or SIG"
+        },
+        "1": {
+          "label": "None",
+          "criteria": "No Red Hat employee involvement in project governance or leadership identified"
+        }
+      }
+    }
+  },
+  "confidence_levels": {
+    "high": "Data from authoritative source (LDAP, GitHub API, governance files in repo). GitHub username resolved via LDAP rhatSocialURL.",
+    "medium": "Data from GitHub API but employee resolved via git log email match. Or data from semi-structured project docs.",
+    "low": "Data from web search or employee resolved via gh search users name match. May require manual verification.",
+    "not_found": "Could not find data for this metric. The absence of data does not necessarily mean absence of contribution."
+  },
+  "coverage_thresholds": {
+    "warning_below_pct": 70,
+    "warning_message": "GitHub username resolution coverage is below 70%. Contribution metrics may undercount Red Hat involvement."
+  }
+}
