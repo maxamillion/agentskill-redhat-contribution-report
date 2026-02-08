@@ -38,20 +38,31 @@ Given an organizational leader's email address and a list of open source project
 
 ## Installation
 
-### From AgentSkill Marketplace
+### From Marketplace
 
-```bash
-claude skill install maxamillion-agentskill-redhat-contribution-report
+First, add the marketplace source (inside Claude Code):
+
+```
+/plugin marketplace add maxamillion/agentskill-redhat-contribution-report
+```
+
+Then install the plugin:
+
+```
+/plugin install redhat-contribution-report@maxamillion-agentskill-redhat-contribution-report
 ```
 
 ### From Source
 
-Clone this repository and register it as a local plugin:
+Clone this repository and add it as a local plugin (inside Claude Code):
 
 ```bash
 git clone https://github.com/maxamillion/agentskill-redhat-contribution-report.git
-cd agentskill-redhat-contribution-report
-claude plugin add .
+```
+
+```
+/plugin marketplace add /path/to/agentskill-redhat-contribution-report
+/plugin install redhat-contribution-report@maxamillion-agentskill-redhat-contribution-report
 ```
 
 ## Usage
