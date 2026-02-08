@@ -1,26 +1,13 @@
 ---
 name: redhat-contribution-report
-description: >
-  Evaluates Red Hat's contribution to open source projects by identifying
-  employees under a given manager via LDAP and measuring their GitHub
-  contributions, maintainership, governance roles, and roadmap influence.
-  Use when evaluating Red Hat employee contributions, organizational engagement,
-  or open source investment for one or more projects. Supports multiple projects
-  in a single evaluation run.
+description: Evaluates Red Hat's contribution to open source projects by identifying employees under a given manager via LDAP and measuring their GitHub contributions, maintainership, governance roles, and roadmap influence. Use when evaluating Red Hat employee contributions, organizational engagement, or open source investment for one or more projects. Supports multiple projects in a single evaluation run.
 license: MIT
-compatibility: >
-  Requires RHEL or Fedora Linux with access to Red Hat internal LDAP
-  (ldap.corp.redhat.com), a valid Kerberos ticket, and authenticated gh CLI.
+compatibility: Requires RHEL or Fedora Linux with access to Red Hat internal LDAP (ldap.corp.redhat.com), a valid Kerberos ticket, and authenticated gh CLI.
 metadata:
   author: Adam Miller
   email: admiller@redhat.com
   version: "1.0"
-allowed-tools: >
-  Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*)
-  Bash(git log:*) Bash(git clone:*) Bash(git remote:*)
-  Bash(mkdir:*) Bash(python3:*) Bash(date:*)
-  Read Glob Grep Task
-  WebSearch WebFetch
+allowed-tools: Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*) Bash(git log:*) Bash(git clone:*) Bash(git remote:*) Bash(mkdir:*) Bash(python3:*) Bash(date:*) Read Glob Grep Task WebSearch WebFetch
 ---
 
 # Red Hat Open Source Contribution Evaluation
