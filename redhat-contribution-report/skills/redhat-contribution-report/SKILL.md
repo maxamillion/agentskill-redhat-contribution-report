@@ -14,9 +14,10 @@ allowed-tools: Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*) Bash(git log:*) Bash(
 
 Evaluate Red Hat employee contributions to one or more open source projects by:
 1. Traversing Red Hat's internal LDAP to find all employees under a given org leader
-2. Resolving their GitHub usernames
-3. Dispatching parallel sub-agents to evaluate each project across 5 KPIs
-4. Generating a consolidated markdown report
+2. Writing the employee roster to a JSON file for sub-agent consumption
+3. Centralizing GitHub username resolution via a dedicated sub-agent
+4. Dispatching 5 parallel KPI sub-agents per project (one per KPI)
+5. Generating a consolidated markdown report from checkpoint files
 
 ## Quick Start
 
@@ -135,17 +136,73 @@ All LDAP queries MUST use GSSAPI authentication (`-Y GSSAPI`). Never use simple 
 
    If the org exceeds 500 employees, warn the user that this is a very large scope and ask if they want to continue or narrow the search.
 
+6. **Write the employee roster to a JSON file** for sub-agent consumption:
+   ```bash
+   mkdir -p reports/tmp
+   ```
+   Then use the Write tool to save the roster to `reports/tmp/employee-roster.json` with this schema:
+   ```json
+   {
+     "generated_at": "YYYY-MM-DDTHH:MM:SSZ",
+     "manager": {"name": "...", "uid": "...", "email": "..."},
+     "total_employees": 125,
+     "resolved_count": 40,
+     "resolution_coverage_pct": 32.0,
+     "employees": [
+       {
+         "name": "Jane Doe",
+         "uid": "jdoe",
+         "email": "jdoe@redhat.com",
+         "title": "Senior Software Engineer",
+         "github_username": "janedoe",
+         "github_resolution_method": "ldap",
+         "github_resolution_tier": 1,
+         "depth": 2
+       }
+     ]
+   }
+   ```
+   - Set `github_resolution_tier` to `1` for LDAP-resolved usernames, `null` for unresolved
+   - Set `github_username` to `null` for employees without LDAP resolution
+   - This file is the single source of truth for the roster — sub-agents reference it by path and never receive the roster inline
+
 ### Phase 3: GitHub Username Resolution Summary
 
-Review the roster built in Phase 2:
-- Employees with GitHub usernames from LDAP are marked as **Tier 1 (High confidence)**
-- Employees without GitHub usernames will be resolved by sub-agents in Phase 4 using git log email matching (**Tier 2, Medium confidence**) and GitHub user search (**Tier 3, Low confidence**)
+Review the roster JSON written in Phase 2 (`reports/tmp/employee-roster.json`):
+- Employees with GitHub usernames from LDAP are marked as **Tier 1 (High confidence)** (`github_resolution_tier: 1`)
+- Employees without GitHub usernames (`github_username: null`) will be resolved by the centralized Username Resolution Agent in Phase 3.5
 
-Report the current resolution state to the user before proceeding.
+Report the current resolution state to the user before proceeding. Include:
+- Total employees, resolved count, coverage percentage
+- Note that Phase 3.5 will attempt to resolve remaining employees before KPI evaluation begins
+
+### Phase 3.5: Centralized Username Resolution
+
+Launch a **single** dedicated sub-agent to resolve GitHub usernames for all employees who lack LDAP-resolved usernames. This runs once before KPI evaluation, so all KPI agents benefit from the same resolved roster.
+
+Read the Username Resolution Agent prompt template from `references/RESEARCH-PROMPTS.md`.
+
+Prepare the prompt by substituting:
+- `{roster_path}` with `reports/tmp/employee-roster.json`
+- `{project_list}` with a comma-separated list of all target projects (e.g., `kubeflow/kubeflow, kserve/kserve`)
+- `{owner}` and `{repo}` placeholders in the git history search commands with each project's owner/repo
+- `{workdir}` with `reports/tmp`
+
+Launch the sub-agent using `Task` with `subagent_type: general-purpose` and `max_turns: 30`.
+
+**Wait for this agent to complete** before proceeding to Phase 4. The agent will:
+1. Read unresolved employees via python3 (never loads full roster into context)
+2. Batch-search git history across ALL target projects for `@redhat.com` emails
+3. Confirm matches via `gh search commits --author-email`
+4. For remaining unresolved (if <20), try `gh search users` with strict acceptance criteria
+5. Update `reports/tmp/employee-roster.json` in place with resolutions
+6. Write resolution log to `reports/tmp/username-resolutions.md`
+
+After the agent completes, report the updated resolution coverage to the user.
 
 ### Phase 4: Parallel Per-Project Research
 
-Read the Agent A and Agent B prompt templates from `references/RESEARCH-PROMPTS.md`.
+Read the 5 KPI prompt templates from `references/RESEARCH-PROMPTS.md`.
 
 Read the scoring rubric from `assets/scoring-rubric.json`.
 
@@ -153,91 +210,83 @@ Read the scoring rubric from `assets/scoring-rubric.json`.
 ```bash
 mkdir -p reports/tmp/{owner}-{repo}/
 ```
-Run this for every project before dispatching sub-agents. These directories hold raw API output, checkpoint files, and the incremental employee contribution map.
+Run this for every project before dispatching sub-agents. These directories hold raw API output and checkpoint files.
 
 **Compute the evaluation window cutoff date** (6 months ago from today):
 ```bash
 cutoff_date=$(date -d '6 months ago' +%Y-%m-%d)
 ```
 
-For each project, prepare the prompt by substituting:
+For each KPI prompt template, prepare the prompt by substituting:
 - `{owner}` and `{repo}` with the project's owner and repository name
 - `{workdir}` with the working directory path: `reports/tmp/{owner}-{repo}`
 - `{cutoff_date}` with the computed 6-month-ago date in `YYYY-MM-DD` format
-- `{employee_roster}` with the complete employee roster (formatted as shown in the template)
-- `{resolution_coverage_pct}` with the current GitHub username resolution coverage percentage (resolved / total × 100)
-- `{total_employees}` with the total number of employees in the roster
-- `{resolved_employees}` with the number of employees with resolved GitHub usernames
+- `{roster_path}` with `reports/tmp/employee-roster.json`
 
-Include the following ROSTER COVERAGE context block in each sub-agent prompt after the employee roster:
+**Do NOT substitute `{employee_roster}` or embed the roster inline.** Sub-agents access the roster file via `{roster_path}` inside python3 scripts. The roster is never loaded into agent conversation context.
 
-```
-ROSTER COVERAGE: {resolved_employees}/{total_employees} employees have resolved GitHub usernames ({resolution_coverage_pct}%).
-If coverage is below 70%, add an undercount caveat to all percentage-based KPI calculations noting that
-contribution percentages may understate Red Hat involvement due to incomplete username resolution.
-```
+**Launch 5 Task sub-agents per project, ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose` and `max_turns: 8` for each. For N projects, this means 5N Task calls in a single message.
 
-**Launch two Task sub-agents per project (Agent A and Agent B), ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose`. For N projects, this means 2N Task calls in a single message.
+| Agent | KPI | Focus |
+|-------|-----|-------|
+| KPI 1 | PR/Commit Contributions | PRs, commits, code contributions authored or co-authored by roster employees |
+| KPI 2 | Release Management | Release managers who are roster employees |
+| KPI 3 | Maintainer/Reviewer/Approver Roles | Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files |
+| KPI 4 | Roadmap Influence | Enhancement proposals, roadmap features, or design docs led by roster employees |
+| KPI 5 | Leadership Roles | TAC, steering committee, advisory board, or other governance body positions held by roster employees |
 
-- **Agent A** (per project): Username Resolution + KPI 1 (PR/Commit Contributions) + KPI 2 (Release Management)
-- **Agent B** (per project): KPI 3 (Maintainer/Reviewer/Approver Roles) + KPI 4 (Roadmap Influence) + KPI 5 (Leadership Roles)
-
-Both agents for the same project share the same `{workdir}`, `{employee_roster}`, `{cutoff_date}`, and scoring rubric substitutions. Agent A uses the "Agent A" prompt template; Agent B uses the "Agent B" prompt template.
-
-The 5 KPIs across both agents are:
-1. **PR/Commit Contributions** (Agent A) — PRs, commits, code contributions authored or co-authored by roster employees
-2. **Release Management** (Agent A) — Release managers who are roster employees
-3. **Maintainer/Reviewer/Approver Roles** (Agent B) — Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files
-4. **Roadmap Influence** (Agent B) — Enhancement proposals, roadmap features, or design docs led by roster employees
-5. **Leadership Roles** (Agent B) — TAC, steering committee, advisory board, or other governance body positions held by roster employees
+Each agent writes its results to a checkpoint file in `{workdir}/` and returns only a 1-line status message. This keeps orchestrator context minimal.
 
 Refer to `references/DATA-SOURCES.md` for the specific `gh` CLI commands each sub-agent should use.
 
 ### Phase 5: Result Collection & Merge
 
-Collect the output from all sub-agents. There are **2 sub-agents per project** (2N total for N projects):
+Collect the output from all sub-agents. There are **5 sub-agents per project** (5N total for N projects), each returning a 1-line status message. Detailed results are in checkpoint files.
 
-- **Agent A** returns: GitHub username resolutions, KPI 1 (PR/Commit Contributions), KPI 2 (Release Management), and its portion of the employee contribution map
-- **Agent B** returns: KPI 3 (Maintainership), KPI 4 (Roadmap Influence), KPI 5 (Leadership Roles), and its portion of the employee contribution map
+**Step 1:** Read the updated roster from `reports/tmp/employee-roster.json` (updated by the Phase 3.5 Username Resolution Agent).
 
-Username resolution merging (§5.1) uses data from Agent A only. KPI 1-2 results come from Agent A; KPI 3-5 results come from Agent B. Merge both agents' employee contribution maps into a single per-project map.
+**Step 2:** Read the username resolution log from `reports/tmp/username-resolutions.md`.
 
-**Fallback to checkpoint files:** If a sub-agent returned incomplete results or failed (e.g., due to context exhaustion), read whatever intermediate checkpoint files it wrote in `reports/tmp/{owner}-{repo}/`:
-
-Agent A checkpoints:
-- `task1-username-resolutions.md` — GitHub username resolutions
+**Step 3:** For each project, read the 5 KPI checkpoint files from `reports/tmp/{owner}-{repo}/`:
 - `kpi1-pr-contributions.md` — KPI 1 results
 - `kpi2-release-management.md` — KPI 2 results
-- `employee-contribution-map.md` — Agent A employee contribution map
-
-Agent B checkpoints:
 - `kpi3-maintainership.md` — KPI 3 results
 - `kpi4-roadmap-influence.md` — KPI 4 results
 - `kpi5-leadership.md` — KPI 5 results
-- `employee-contribution-map-b.md` — Agent B employee contribution map
 
-Use whatever checkpoint files exist to fill in gaps in the sub-agent's returned output. If a checkpoint file exists for a KPI that the sub-agent didn't return results for, use the checkpoint data directly. Note in the Data Quality section which KPIs were recovered from checkpoints.
+**Step 4: Handle missing checkpoints.** If a checkpoint file does not exist (agent failed or was rate-limited), mark that KPI as "Not evaluated" with score 1 and confidence "Not Found". Note which KPIs were missing in the Data Quality section.
 
-#### §5.1 GitHub Username Merge Rules
+**Step 5: Build per-project Employee Contribution Maps** using python3 to scan checkpoint files:
+```bash
+python3 -c "
+import json, re, os
+roster = json.load(open('reports/tmp/employee-roster.json'))
+workdir = 'reports/tmp/{owner}-{repo}'
+kpi_files = ['kpi1-pr-contributions.md','kpi2-release-management.md','kpi3-maintainership.md','kpi4-roadmap-influence.md','kpi5-leadership.md']
+gh_users = {e['github_username'].lower(): e['name'] for e in roster['employees'] if e.get('github_username')}
+for i, f in enumerate(kpi_files, 1):
+    path = os.path.join(workdir, f)
+    if os.path.exists(path):
+        content = open(path).read()
+        found = [u for u in gh_users if u in content.lower()]
+        for u in found:
+            print(f'{gh_users[u]} | @{u} | KPI {i}')
+    else:
+        print(f'KPI {i}: checkpoint missing')
+"
+```
 
-When multiple sub-agents resolve the same employee to a GitHub username:
-- **Same username, same tier:** Accept — no conflict.
-- **Same username, different tiers:** Keep the highest-tier (most reliable) resolution. Record both tiers in the Data Quality section.
-- **Different usernames, different tiers:** Accept the higher-tier resolution. Discard the lower-tier candidate but note the discrepancy in the Data Quality section.
-- **Different usernames, same tier:** Flag as an unresolvable conflict in the Data Quality section. Do not silently pick one — present both candidates to the user for manual verification. Use the candidate with more evidence (e.g., more commits in the target repos) as the primary, but mark confidence as Low.
-- **Never silently discard** a resolution. All conflicts and resolution decisions must be documented.
-
-#### §5.2 KPI Result Aggregation
+#### §5.1 KPI Result Aggregation
 
 - Keep per-project KPI results **separate** — do not average or merge scores across projects.
 - Verify that each sub-agent's assigned score matches the rubric thresholds in `assets/scoring-rubric.json` against the sub-agent's own reported data. If a score appears inconsistent with the data (e.g., score of 4 but data shows < 10% PR contribution), adjust to match the rubric and note the correction.
 
-#### §5.3 Post-Merge Coverage Update
+#### §5.2 Coverage Verification
 
-After merging all newly resolved usernames from sub-agents:
-- Recalculate the resolution coverage percentage.
-- If coverage improved significantly (> 10 percentage points), note this in the Data Quality section.
-- If coverage remains below 70%, ensure the undercount caveat appears in the final report.
+After collecting all results:
+- Read the final resolution coverage from `reports/tmp/employee-roster.json` (`resolution_coverage_pct` field).
+- If coverage is below 70%, ensure the undercount caveat appears in the final report.
+- Note the resolution coverage and method breakdown in the Data Quality section.
 
 ### Phase 6: Report Generation
 

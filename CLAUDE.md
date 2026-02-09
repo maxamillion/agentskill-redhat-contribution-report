@@ -12,16 +12,17 @@ A Claude Code AgentSkill marketplace plugin that evaluates Red Hat employee cont
 
 ## Architecture
 
-The skill runs a 6-phase sequential workflow orchestrated by SKILL.md:
+The skill runs a 7-phase sequential workflow orchestrated by SKILL.md:
 
 1. **Input parsing** — manager email + project list from `$ARGUMENTS`
-2. **LDAP traversal** — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`)
-3. **GitHub username resolution** — 3-tier: LDAP `rhatSocialURL` > git log email match > `gh search users`
-4. **Parallel sub-agents** — one `Task` (subagent_type: `general-purpose`) per project, all launched in a single message
-5. **Result collection** — merge sub-agent findings and GitHub username resolutions
+2. **LDAP traversal** — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`); writes roster to `reports/tmp/employee-roster.json`
+3. **Resolution summary** — report LDAP-resolved (Tier 1) vs unresolved employees
+3.5. **Centralized username resolution** — single dedicated sub-agent resolves GitHub usernames across all target projects; updates roster JSON in place
+4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message with `max_turns: 8`
+5. **Result collection** — read 5 checkpoint files per project from `reports/tmp/{owner}-{repo}/`; no inline roster merging needed
 6. **Report generation** — markdown report to `reports/YYYY-MM-DD-redhat-contribution-eval.md`
 
-Sub-agents evaluate 5 KPIs per project: PR contributions, release management, maintainership, roadmap influence, and governance leadership roles. The prompt template is in `references/RESEARCH-PROMPTS.md` with `{owner}`, `{repo}`, and `{employee_roster}` placeholders.
+Sub-agents evaluate 5 KPIs per project: PR contributions, release management, maintainership, roadmap influence, and governance leadership roles. The employee roster is externalized to a JSON file (`reports/tmp/employee-roster.json`) — sub-agents access it via `{roster_path}` inside python3 scripts, keeping it out of agent conversation context. Each agent returns a 1-line status and writes detailed results to checkpoint files. Prompt templates are in `references/RESEARCH-PROMPTS.md` with `{owner}`, `{repo}`, and `{roster_path}` placeholders.
 
 ## Key Files
 

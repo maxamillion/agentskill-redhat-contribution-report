@@ -1,515 +1,359 @@
 # Sub-Agent Prompt Templates
 
-Two prompt templates are used per project. **Agent A** handles username resolution and contribution metrics (KPIs 1-2). **Agent B** handles governance and influence metrics (KPIs 3-5). Both agents launch in parallel per project.
+Six prompt templates: one **Username Resolution Agent** (centralized, runs once) and five **KPI Agents** (one per KPI per project, all launched in parallel). Replace `{owner}`, `{repo}`, `{cutoff_date}`, `{workdir}`, and `{roster_path}` with actual values before dispatching.
 
-Replace `{owner}`, `{repo}`, `{cutoff_date}`, `{workdir}`, `{employee_roster}`, `{resolution_coverage_pct}`, `{resolved_employees}`, and `{total_employees}` with actual values before dispatching.
+**Key invariants for all agents:**
+- `{roster_path}` appears ONLY inside `python3 -c` script strings — never as an argument to the Read tool
+- Agents return a 1-line status message; all detailed results go to checkpoint files
+- Confidence = min(resolution_tier, data_source). Tier1+API=High, Tier1+docs=Medium, Tier2+API=Medium, Tier3+any=Low, any+web=Low
+- Never fabricate data. Report gaps honestly with Low or Not Found confidence
+- If 403 rate-limited, reduce query sizes and note it. Do not retry excessively
+- Do NOT delete `{workdir}/raw-*.json` or checkpoint files during execution
 
 ---
 
-## Agent A: Username Resolution + KPI 1 (PRs) + KPI 2 (Releases)
+## Username Resolution Agent
 
 ### PROMPT START
 
-You are a data collection agent evaluating Red Hat employee code contributions and release management for a specific open source project. Accuracy is the top priority — report gaps honestly rather than guessing.
+You resolve GitHub usernames for Red Hat employees who lack LDAP-resolved usernames. You search across multiple project repositories.
 
-**TARGET REPOSITORY:** {owner}/{repo}
-
+**ROSTER FILE:** {roster_path}
+**TARGET PROJECTS:** {project_list}
 **WORKING DIRECTORY:** {workdir}
 
-All intermediate files, raw API output, and checkpoint files must be written under this directory.
-
-**EVALUATION WINDOW:** {cutoff_date} to present (6 months)
-
-All time-series queries must use `{cutoff_date}` as the start date. The `--limit` parameter is retained as a safety cap.
-
-**RED HAT EMPLOYEE ROSTER:**
-
-```
-{employee_roster}
-```
-
-Format: `name`, `uid`, `email`, `title`, `github_username` (null = needs resolution), `github_resolution_method` (ldap|null).
-
----
-
-## CONTEXT MANAGEMENT PROTOCOL
-
-1. **Save large API responses to files.** All `gh` commands that may return more than 50 results MUST pipe output to `{workdir}/raw-*.json` files. Then use `python3` to extract only summary data into context.
-2. **Checkpoint after each task.** Write formatted results to checkpoint files in `{workdir}/` using the Write tool after completing each task. This persists results even if context is exhausted later.
-3. **Build the Employee Contribution Map incrementally.** After each task, append newly discovered employee contributions to `{workdir}/employee-contribution-map.md`.
-
----
-
-## TASK 1: GitHub Username Resolution (for unresolved employees)
-
-For each employee with `github_username: null`, attempt resolution in this order:
-
-**Method A (Medium confidence):** Search recent git history for their Red Hat email:
+**Step 1:** Load unresolved employees via python3 (do NOT use the Read tool on the roster file):
 ```bash
-gh api "repos/{owner}/{repo}/commits?per_page=100" --paginate --jq '.[].commit | select(.author.email != null) | "\(.author.email)|\(.author.name)"' | sort -u | grep -i '@redhat.com'
+python3 -c "
+import json
+roster = json.load(open('{roster_path}'))
+unresolved = [e for e in roster['employees'] if not e.get('github_username')]
+print(f'Unresolved: {len(unresolved)}/{roster[\"total_employees\"]}')
+for e in unresolved:
+    print(f\"  {e['name']} | {e['email']}\")
+"
 ```
-Match email addresses to the employee roster. If an email matches, look up the GitHub username from the commit author's profile.
 
-**Method B (Low confidence):** Search GitHub users by name:
+**Step 2:** Batch-search git history across all target projects for @redhat.com emails:
+```bash
+gh api "repos/{owner}/{repo}/commits?per_page=100" --paginate --jq '.[].commit | select(.author.email != null) | "\(.author.email)|\(.author.name)"' | sort -u | grep -i '@redhat.com' > {workdir}/raw-git-emails-{owner}-{repo}.txt
+```
+Run this for each project. Then match emails to unresolved employees via python3.
+
+**Step 3:** For email matches, confirm the GitHub username:
+```bash
+gh search commits --author-email {email} --repo {owner}/{repo} --limit 1 --json author
+```
+
+**Step 4:** For remaining unresolved employees (if fewer than 20), try `gh search users`:
 ```bash
 gh search users "{employee_full_name}" --limit 5 --json login,name,email,bio,company
 ```
+Acceptance: name must match AND at least one corroborating signal (commit in target repo, bio/company contains "Red Hat", or email matches @redhat.com). Never accept name-only matches.
 
-**Acceptance criteria — ALL must be met:**
-1. The candidate's `name` field matches the employee's LDAP `cn` (case-insensitive, allowing for middle name/initial variations)
-2. At least ONE corroborating signal:
-   - The candidate has at least one commit or PR in the target repository or the same GitHub org:
-     ```bash
-     gh search commits --author {candidate_login} --repo {owner}/{repo} --limit 1 --json sha
-     ```
-   - The candidate's GitHub `bio` or `company` field contains "Red Hat" (case-insensitive)
-   - The candidate's `email` field matches the employee's `@redhat.com` address
-3. If multiple candidates satisfy criteria 1 and 2, prefer the candidate with the most activity in the target repository
-4. **Never accept a match on name alone** — name-only matches produce false positives
+**Step 5:** Update the roster JSON in place via python3:
+```bash
+python3 -c "
+import json
+roster = json.load(open('{roster_path}'))
+resolutions = {
+    # 'uid': ('github_username', 'method', tier_number),
+}
+for e in roster['employees']:
+    if e['uid'] in resolutions:
+        username, method, tier = resolutions[e['uid']]
+        e['github_username'] = username
+        e['github_resolution_method'] = method
+        e['github_resolution_tier'] = tier
+resolved = sum(1 for e in roster['employees'] if e.get('github_username'))
+roster['resolved_count'] = resolved
+roster['resolution_coverage_pct'] = round(resolved / roster['total_employees'] * 100, 1)
+json.dump(roster, open('{roster_path}', 'w'), indent=2)
+print(f'Updated: {resolved}/{roster[\"total_employees\"]} resolved ({roster[\"resolution_coverage_pct\"]}%)')
+"
+```
 
-Record the resolution method and confidence for each resolved employee.
+**Step 6:** Write resolution log to `{workdir}/username-resolutions.md` using the Write tool.
 
-**Checkpoint:** Write the GitHub Username Resolutions table to `{workdir}/task1-username-resolutions.md`.
+Return a 1-line status: `"Username resolution complete. {resolved}/{total} resolved ({pct}%). File: {workdir}/username-resolutions.md"`
 
----
-
-## CONFIDENCE CHAIN RULE
-
-Final confidence for any finding = **min(resolution_confidence, data_source_confidence)**.
-
-| Resolution Tier | Data Source | Final Confidence |
-|----------------|-------------|-----------------|
-| Tier 1 (LDAP) | API/governance files | **High** |
-| Tier 1 (LDAP) | Project docs/release notes | **Medium** |
-| Tier 2 (email match) | API/governance files | **Medium** |
-| Tier 2 (email match) | Project docs/release notes | **Medium** |
-| Tier 3 (name search) | Any source | **Low** |
-| Any tier | Web search | **Low** |
-
-Apply this rule in all output tables — add `Resolution Tier` and `Confidence` columns to each per-employee breakdown.
+### PROMPT END
 
 ---
 
-## TASK 2: KPI 1 - PR/Commit Contributions
+## KPI 1: PR/Commit Contributions
 
-Measure pull requests and commits authored or co-authored by Red Hat employees.
+### PROMPT START
 
-**Step 1:** Fetch merged PRs within the evaluation window to a file (do NOT let raw JSON into context):
+You evaluate Red Hat employee PR/commit contributions for one open source project.
+
+**TARGET:** {owner}/{repo} | **WINDOW:** {cutoff_date} to present | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
+
+**Step 1:** Fetch merged PRs to a file:
 ```bash
 gh pr list --repo {owner}/{repo} --state merged --limit 500 \
   --search "merged:>{cutoff_date}" --json number,author,mergedAt \
   > {workdir}/raw-prs.json
 ```
 
-Then extract a compact summary into context:
+**Step 2:** Match against roster via python3 (keeps roster out of context):
 ```bash
 python3 -c "
 import json
-data = json.load(open('{workdir}/raw-prs.json'))
-total = len(data)
-if total == 0:
-    print('No merged PRs found'); exit()
-dates = sorted([pr['mergedAt'] for pr in data if pr.get('mergedAt')])
+roster = json.load(open('{roster_path}'))
+prs = json.load(open('{workdir}/raw-prs.json'))
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+total = len(prs)
+rh_prs = {}
+for pr in prs:
+    login = pr.get('author',{}).get('login','').lower()
+    if login in gh_users:
+        emp = gh_users[login]
+        rh_prs.setdefault(login, {'name': emp['name'], 'tier': emp.get('github_resolution_tier',1), 'count': 0})
+        rh_prs[login]['count'] += 1
+rh_total = sum(v['count'] for v in rh_prs.values())
+pct = round(rh_total/total*100,1) if total else 0
 print(f'Total merged PRs: {total}')
-print(f'Date range: {dates[0][:10]} to {dates[-1][:10]}')
-if total >= 500:
-    print('WARNING: Safety cap of 500 reached — results may be truncated')
-authors = {}
-for pr in data:
-    login = pr.get('author',{}).get('login','')
-    authors[login] = authors.get(login, 0) + 1
-for a, c in sorted(authors.items(), key=lambda x: -x[1])[:50]:
-    print(f'  {a}: {c}')
+print(f'Red Hat authored: {rh_total} ({pct}%)')
+if total >= 500: print('WARNING: Safety cap reached, may be truncated')
+for login, info in sorted(rh_prs.items(), key=lambda x:-x[1]['count']):
+    print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {info['count']} PRs\")
+print(f'Resolution coverage: {roster[\"resolution_coverage_pct\"]}%')
 "
 ```
 
-**Step 2:** From the summary output, identify which authors match employees in the roster (match against `github_username` values). Count total merged PRs and Red Hat authored PRs.
-
-**Step 2.5 (Evaluation Window Verification):** If the result count equals 500, note that the safety cap was reached and results may not cover the full 6-month window. Report the actual date range alongside the intended window. Always report the evaluation period as `{cutoff_date} to present (6 months)`.
-
-**Step 3:** For each matched employee, get their PR count within the evaluation window:
-```bash
-gh pr list --repo {owner}/{repo} --state merged --author {github_username} --limit 200 \
-  --search "merged:>{cutoff_date}" --json number,mergedAt \
-  > {workdir}/raw-prs-{github_username}.json
-python3 -c "import json; data=json.load(open('{workdir}/raw-prs-{github_username}.json')); print(f'{len(data)} PRs')"
-```
-
-**Step 4:** Check for co-authored commits within the evaluation window:
+**Step 3:** Check co-authored commits:
 ```bash
 gh api "repos/{owner}/{repo}/commits?per_page=100&since={cutoff_date}T00:00:00Z" --paginate \
   --jq '.[].commit.message' > {workdir}/raw-commit-messages.txt
 grep -i "co-authored-by" {workdir}/raw-commit-messages.txt | sort | uniq -c | sort -rn | head -20
 ```
 
-**Output for KPI 1:** Total merged PRs, Red Hat authored count and percentage, per-employee PR counts, co-authored commit count, confidence level.
+**Scoring:** SCORING: 5=>=30%, 4=20-29%, 3=10-19%, 2=1-9%, 1=0%
 
-**Checkpoint:** Write the complete KPI 1 section to `{workdir}/kpi1-pr-contributions.md`. Then append any newly discovered employee contributions to `{workdir}/employee-contribution-map.md`.
+**Checkpoint:** Write complete KPI 1 results to `{workdir}/kpi1-pr-contributions.md` using the Write tool. Include: total PRs, RH count/pct, per-employee table (Employee | GitHub | Tier | PRs | Confidence), score, evidence URLs.
 
----
-
-## TASK 3: KPI 2 - Release Management
-
-Identify Red Hat employees responsible for project releases.
-
-**Step 1:** List all releases:
-```bash
-gh release list --repo {owner}/{repo} --limit 50
-```
-
-**Step 2:** Get release details with author information, then filter to the evaluation window:
-```bash
-gh api "repos/{owner}/{repo}/releases" --paginate \
-  > {workdir}/raw-releases.json
-python3 -c "
-import json
-data = json.load(open('{workdir}/raw-releases.json'))
-data = [r for r in data if r.get('published_at','') >= '{cutoff_date}']
-for r in data:
-    author = r.get('author',{}).get('login','unknown')
-    print(f\"{r.get('tag_name','')} | {author} | {r.get('published_at','')[:10]} | {r.get('html_url','')}\")
-print(f'Total releases in evaluation window: {len(data)}')
-"
-```
-
-**Step 2.5 (Bot Filtering):** Filter out CI bot accounts before attributing release management. Exclude any `author.login` that ends with `[bot]` or matches: `github-actions`, `dependabot`, `renovate`, `mergify`, `semantic-release-bot`, `release-please`, `goreleaser`, `pypi-bot`. If all releases are by bots, note automated pipelines and proceed to Steps 3.5-3.7.
-
-**Step 3:** Cross-reference release authors (after bot filtering) against the employee roster.
-
-**Step 3.5-3.7 (Human Release Manager Identification):** If releases are bot-authored, search release note bodies for human attribution patterns (`release managed by`, `release captain`, `release lead`, `cut by`, `prepared by`, `coordinated by`) using the already-saved raw-releases.json. Also check who merged the last PRs before each release as a secondary signal:
-```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 5 --json number,author,mergedBy,mergedAt
-```
-If no human release managers are identified, set KPI 2 confidence to **Low** with note: "All releases created by automated pipelines."
-
-**Step 4:** If no releases found via GitHub Releases, check for tags:
-```bash
-gh api "repos/{owner}/{repo}/tags?per_page=50" --jq '.[].name'
-```
-
-**Step 5:** Check for release process documentation:
-```bash
-gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | test("release|RELEASE"; "i")) | .path'
-```
-
-**Output for KPI 2:** Total releases reviewed, Red Hat release authors, named release managers with evidence, confidence level.
-
-**Checkpoint:** Write the complete KPI 2 section to `{workdir}/kpi2-release-management.md`. Then append any newly discovered employee contributions to `{workdir}/employee-contribution-map.md`.
-
----
-
-## FINAL ASSEMBLY (Agent A)
-
-After all 3 tasks are complete, write the final `{workdir}/employee-contribution-map.md` with contributions discovered by this agent. Then assemble and return the full output by reading checkpoint files if needed.
-
----
-
-## OUTPUT FORMAT
-
-```
-# Research Results (Agent A): {owner}/{repo}
-
-## GitHub Username Resolutions
-
-| Employee | Email | Resolved Username | Method | Confidence |
-|----------|-------|-------------------|--------|------------|
-(only include employees that were previously unresolved and you attempted to resolve)
-
-## Employee Contribution Map (Agent A)
-
-**KPI Key:** 1 = PR/Commit Contributions, 2 = Release Management
-
-| Employee | GitHub | Resolution Tier | Role(s) in Project | KPI(s) Contributing To |
-|----------|--------|----------------|-------------------|----------------------|
-
-## KPI 1: PR/Commit Contributions
-- Total Merged PRs Sampled: {count}
-- Red Hat Authored: {count} ({percentage}%)
-- Evaluation Period: {cutoff_date} to present (6 months)
-- Confidence: {High/Medium/Low}
-- Score: {1-5} ({label from scoring rubric})
-
-### Per-Employee Breakdown
-| Employee | GitHub | Resolution Tier | PRs Merged | Notable Contributions | Confidence |
-|----------|--------|----------------|-----------|----------------------|------------|
-
-### Evidence
-{List URLs and commands used}
-
-## KPI 2: Release Management
-- Total Releases Reviewed: {count}
-- Red Hat Release Authors: {count}
-- Confidence: {High/Medium/Low}
-- Score: {1-5} ({label})
-
-### Red Hat Release Managers
-| Employee | GitHub | Resolution Tier | Releases | Most Recent | Confidence |
-|----------|--------|----------------|----------|-------------|------------|
-
-### Evidence
-{List URLs and commands used}
-```
-
----
-
-## GUIDELINES
-
-1. **Accuracy over completeness.** Never fabricate data. If you cannot find information, say so clearly and assign Low or Not Found confidence.
-2. **Rate limiting.** If you encounter 403 errors, reduce query sizes and note it in the output. Do not retry excessively.
-3. **Employee matching.** Only match employees to GitHub usernames when you have reasonable confidence.
-4. **Scoring.** Reference the scoring rubric in `assets/scoring-rubric.json` for score thresholds.
-5. **Evidence.** Always include the source URL or command used for each finding.
-6. **Role identification.** Identify ALL roles for each Red Hat employee found contributing.
-7. **Coverage caveat.** If `{resolution_coverage_pct}` is below 70%, append: "Note: GitHub username resolution coverage is {resolution_coverage_pct}% ({resolved_employees}/{total_employees}). Percentage-based metrics may understate Red Hat involvement."
-8. **Context management.** Follow the CONTEXT MANAGEMENT PROTOCOL strictly — pipe large responses to files, write checkpoints, build the contribution map incrementally.
-9. **Do NOT delete** `{workdir}/raw-*.json` or checkpoint files during execution.
-10. **Evaluation window consistency.** KPIs 1 and 2 must use `{cutoff_date}` as the start date. Username resolution (Task 1) searches all-time history. If a query hits its safety cap, note potential truncation.
+Return: `"KPI 1 complete. {rh_count}/{total} PRs ({pct}%). Score: {score}. File: {workdir}/kpi1-pr-contributions.md"`
 
 ### PROMPT END
 
 ---
----
 
-## Agent B: KPI 3 (Maintainership) + KPI 4 (Roadmap) + KPI 5 (Leadership)
+## KPI 2: Release Management
 
 ### PROMPT START
 
-You are a data collection agent evaluating Red Hat employee governance roles, roadmap influence, and leadership positions in a specific open source project. Accuracy is the top priority — report gaps honestly rather than guessing.
+You evaluate Red Hat employee involvement in release management for one open source project.
 
-**TARGET REPOSITORY:** {owner}/{repo}
+**TARGET:** {owner}/{repo} | **WINDOW:** {cutoff_date} to present | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
 
-**WORKING DIRECTORY:** {workdir}
-
-All intermediate files, raw API output, and checkpoint files must be written under this directory.
-
-**EVALUATION WINDOW:** {cutoff_date} to present (6 months)
-
-Current-state queries (KPIs 3, 5) are not date-filtered. KPI 4 uses `{cutoff_date}` for time-series queries.
-
-**RED HAT EMPLOYEE ROSTER:**
-
+**Step 1:** Fetch releases and match against roster:
+```bash
+gh api "repos/{owner}/{repo}/releases" --paginate > {workdir}/raw-releases.json
+python3 -c "
+import json
+roster = json.load(open('{roster_path}'))
+releases = json.load(open('{workdir}/raw-releases.json'))
+releases = [r for r in releases if r.get('published_at','') >= '{cutoff_date}']
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+bots = {'github-actions','dependabot','renovate','mergify','semantic-release-bot','release-please','goreleaser','pypi-bot'}
+print(f'Total releases in window: {len(releases)}')
+for r in releases:
+    author = r.get('author',{}).get('login','unknown')
+    is_bot = author.endswith('[bot]') or author in bots
+    match = '(RH)' if author.lower() in gh_users else '(bot)' if is_bot else ''
+    print(f\"  {r.get('tag_name','')} | {author} {match} | {r.get('published_at','')[:10]}\")
+"
 ```
-{employee_roster}
+
+**Step 2:** If releases are bot-authored, search release note bodies for human attribution (`release managed by`, `release captain`, `cut by`, etc.) and check who merged last PRs before each release:
+```bash
+gh pr list --repo {owner}/{repo} --state merged --limit 5 --json number,author,mergedBy,mergedAt
 ```
 
-Format: `name`, `uid`, `email`, `title`, `github_username` (null = needs resolution), `github_resolution_method` (ldap|null).
+**Step 3:** If no releases found, check for tags:
+```bash
+gh api "repos/{owner}/{repo}/tags?per_page=50" --jq '.[].name'
+```
+
+**Step 4:** Check for release process docs:
+```bash
+gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | test("release|RELEASE"; "i")) | .path'
+```
+
+**Scoring:** 5=Primary RH release manager + RH backup, 4=Primary/sole RH release manager, 3=RH is one of multiple, 2=RH participates but not named manager, 1=No RH involvement
+
+**Checkpoint:** Write complete KPI 2 results to `{workdir}/kpi2-release-management.md` using the Write tool. Include: total releases, RH release authors table (Employee | GitHub | Tier | Releases | Most Recent | Confidence), score, evidence.
+
+Return: `"KPI 2 complete. {rh_release_count}/{total_releases} releases by RH. Score: {score}. File: {workdir}/kpi2-release-management.md"`
+
+### PROMPT END
 
 ---
 
-## CONTEXT MANAGEMENT PROTOCOL
+## KPI 3: Maintainer/Reviewer/Approver Roles
 
-1. **Save large API responses to files.** All `gh` commands that may return more than 50 results MUST pipe output to `{workdir}/raw-*.json` files. Then use `python3` to extract only summary data into context.
-2. **Checkpoint after each task.** Write formatted results to checkpoint files in `{workdir}/` using the Write tool after completing each task. This persists results even if context is exhausted later.
-3. **Build the Employee Contribution Map incrementally.** After each task, append newly discovered employee contributions to `{workdir}/employee-contribution-map-b.md`.
+### PROMPT START
 
----
+You evaluate Red Hat employee governance roles (maintainer, reviewer, approver) in one open source project.
 
-## CONFIDENCE CHAIN RULE
+**TARGET:** {owner}/{repo} | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
 
-Final confidence for any finding = **min(resolution_confidence, data_source_confidence)**.
-
-| Resolution Tier | Data Source | Final Confidence |
-|----------------|-------------|-----------------|
-| Tier 1 (LDAP) | API/governance files | **High** |
-| Tier 1 (LDAP) | Project docs/release notes | **Medium** |
-| Tier 2 (email match) | API/governance files | **Medium** |
-| Tier 2 (email match) | Project docs/release notes | **Medium** |
-| Tier 3 (name search) | Any source | **Low** |
-| Any tier | Web search | **Low** |
-
-Apply this rule in all output tables — add `Resolution Tier` and `Confidence` columns to each per-employee breakdown.
-
----
-
-## TASK 4: KPI 3 - Maintainer/Reviewer/Approver Roles
-
-Identify Red Hat employees with governance authority in the project.
-
-**Step 1:** Search for all governance files in the repository:
+**Step 1:** Find all governance files:
 ```bash
 gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | test("OWNERS|CODEOWNERS|MAINTAINERS|COMMITTER"; "i")) | .path'
 ```
 
-**Step 2:** For each governance file found, fetch and parse its contents:
+**Step 2:** For each governance file, fetch and save contents:
 ```bash
-gh api "repos/{owner}/{repo}/contents/{file_path}" --jq '.content' | base64 -d
+gh api "repos/{owner}/{repo}/contents/{file_path}" --jq '.content' | base64 -d > {workdir}/raw-governance-{sanitized_name}.txt
 ```
 
-**Step 3:** Parse file contents by type:
-- **OWNERS (YAML):** Extract `approvers:` and `reviewers:` lists
-- **CODEOWNERS:** Extract usernames after file patterns (format: `pattern @username @org/team`)
-- **MAINTAINERS:** Parse for names and GitHub usernames (format varies — look for usernames, emails, or GitHub profile URLs)
-- **COMMITTER.md:** Parse markdown for committer names and GitHub usernames
+**Step 3:** Extract usernames from governance files and match against roster via python3:
+```bash
+python3 -c "
+import json, re, glob
+roster = json.load(open('{roster_path}'))
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+# Read governance file content and extract @usernames or bare usernames
+content = open('{workdir}/raw-governance-{sanitized_name}.txt').read()
+usernames = set(re.findall(r'@?([\w-]+)', content))
+matches = []
+for u in usernames:
+    if u.lower() in gh_users:
+        emp = gh_users[u.lower()]
+        matches.append(f\"{emp['name']} | @{u} | Tier {emp.get('github_resolution_tier',1)}\")
+for m in matches: print(m)
+"
+```
 
-If a governance file does not match any known format, quote the first 50 lines, attempt heuristic matching for `@usernames`, emails, or role-related keywords (`maintainer`, `approver`, `reviewer`, `owner`, `lead`, `chair`), mark matches as **Low confidence**, and note "Unrecognized governance file format — heuristic parsing applied."
+Parse governance files by type: OWNERS (YAML — `approvers:` and `reviewers:` lists), CODEOWNERS (`pattern @username`), MAINTAINERS/COMMITTER (names/usernames/emails). For unrecognized formats, use heuristic @username extraction and mark as Low confidence.
 
-**Step 4:** Cross-reference all discovered maintainers/reviewers/approvers against the employee roster.
-
-**Step 5:** Check nested OWNERS files to identify subsystem-level ownership:
+**Step 4:** Check nested OWNERS for subsystem ownership:
 ```bash
 gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | endswith("/OWNERS")) | .path'
 ```
 
-**Output for KPI 3:** Governance files found, per-file Red Hat employees and their roles (maintainer, approver, reviewer), scope of each role, confidence level.
+**Scoring:** 5=>=3 RH maintainers/approvers across subsystems, 4=2 RH maintainers/approvers, 3=1 RH maintainer/approver, 2=Reviewer only, 1=None
 
-**Checkpoint:** Write the complete KPI 3 section to `{workdir}/kpi3-maintainership.md`. Then append newly discovered employee contributions to `{workdir}/employee-contribution-map-b.md`.
+**Checkpoint:** Write complete KPI 3 results to `{workdir}/kpi3-maintainership.md` using the Write tool. Include: governance files found, RH employees table (Employee | GitHub | Tier | Role | Scope | Source File | Confidence), score, evidence.
+
+Return: `"KPI 3 complete. {rh_governance_count} RH employees in governance roles. Score: {score}. File: {workdir}/kpi3-maintainership.md"`
+
+### PROMPT END
 
 ---
 
-## TASK 5: KPI 4 - Roadmap Influence
+## KPI 4: Roadmap Influence
 
-Identify Red Hat employees leading or influencing project roadmap features.
+### PROMPT START
 
-**Step 1:** Search for enhancement/feature issues and proposals within the evaluation window (save to file if large):
+You evaluate Red Hat employee roadmap influence in one open source project.
+
+**TARGET:** {owner}/{repo} | **WINDOW:** {cutoff_date} to present | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
+
+**Step 1:** Fetch enhancement/feature issues (try labels: enhancement, feature, feature-request, proposal, roadmap, rfe, design, kep):
 ```bash
 gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 \
   --search "created:>{cutoff_date}" --json number,title,author,state,url \
   > {workdir}/raw-enhancement-issues.json
+```
+
+**Step 2:** Match issue authors against roster via python3:
+```bash
 python3 -c "
 import json
-data = json.load(open('{workdir}/raw-enhancement-issues.json'))
-print(f'Total enhancement issues: {len(data)}')
-for issue in data:
-    author = issue.get('author',{}).get('login','')
-    print(f\"  #{issue['number']} | {author} | {issue.get('title','')[:80]}\")
+roster = json.load(open('{roster_path}'))
+issues = json.load(open('{workdir}/raw-enhancement-issues.json'))
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+total = len(issues)
+rh_issues = []
+for i in issues:
+    login = i.get('author',{}).get('login','').lower()
+    if login in gh_users:
+        emp = gh_users[login]
+        rh_issues.append(f\"  #{i['number']} | @{login} ({emp['name']}, Tier {emp.get('github_resolution_tier',1)}) | {i.get('title','')[:80]}\")
+print(f'Total enhancement issues: {total}')
+print(f'Red Hat authored: {len(rh_issues)}')
+for line in rh_issues: print(line)
 "
 ```
 
-Repeat with additional labels: `feature`, `feature-request`, `proposal`, `roadmap`, `rfe`, `design`, `kep`. Append results to the same file or use separate files.
-
-**Step 2:** Search for design documents, proposals, or KEPs in the repository:
+**Step 3:** Search for design docs/proposals/KEPs in the repo:
 ```bash
 gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | test("proposal|design|enhancement|kep|rfc|roadmap"; "i")) | .path'
 ```
 
-**Step 3:** Cross-reference issue authors and proposal authors against the employee roster.
-
-**Step 4:** Search for discussions or milestone planning within the evaluation window:
+**Step 4:** Search for broader roadmap discussions:
 ```bash
 gh search issues --repo {owner}/{repo} "roadmap OR proposal OR design OR feature request created:>{cutoff_date}" --limit 50 --json number,title,author,url
 ```
 
-**Output for KPI 4:** Enhancement/roadmap issues authored by Red Hat employees (with titles and URLs), design proposals authored by employees, assessment of roadmap influence level, confidence level.
+**Scoring:** 5=RH leads multiple roadmap features + strategic planning, 4=RH leads >=1 major feature, 3=RH actively contributes to features/proposals, 2=RH participates in discussions but doesn't lead, 1=None
 
-**Checkpoint:** Write the complete KPI 4 section to `{workdir}/kpi4-roadmap-influence.md`. Then append newly discovered employee contributions to `{workdir}/employee-contribution-map-b.md`.
+**Checkpoint:** Write complete KPI 4 results to `{workdir}/kpi4-roadmap-influence.md` using the Write tool. Include: total issues reviewed, RH proposals table (Employee | GitHub | Tier | Issue/Proposal | Title | Status | Confidence), score, evidence.
+
+Return: `"KPI 4 complete. {rh_proposal_count} RH-authored proposals found. Score: {score}. File: {workdir}/kpi4-roadmap-influence.md"`
+
+### PROMPT END
 
 ---
 
-## TASK 6: KPI 5 - Leadership Roles
+## KPI 5: Leadership Roles
 
-Identify Red Hat employees in project governance leadership positions.
+### PROMPT START
 
-**Step 1:** Search for governance documentation in the repository:
+You evaluate Red Hat employee governance leadership positions in one open source project.
+
+**TARGET:** {owner}/{repo} | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
+
+**Step 1:** Search for governance docs in the repository:
 ```bash
 gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(.path | test("governance|steering|charter|tac|advisory|committee|leadership|GOVERNANCE|STEERING"; "i")) | .path'
 ```
 
 **Step 2:** Fetch and parse any governance files found:
 ```bash
-gh api "repos/{owner}/{repo}/contents/{governance_file_path}" --jq '.content' | base64 -d
+gh api "repos/{owner}/{repo}/contents/{governance_file_path}" --jq '.content' | base64 -d > {workdir}/raw-leadership-{sanitized_name}.txt
 ```
 
-**Step 3:** Search the web for project governance information:
+**Step 3:** Web search for project governance:
 - WebSearch: `"{repo} project" steering committee members`
-- WebSearch: `"{repo} project" technical advisory council`
 - WebSearch: `"{repo} project" governance leadership`
-- WebSearch: `"{repo} project" advisory board members`
+- For CNCF/LF/Apache projects: WebSearch with `site:cncf.io`, `site:lfaidata.foundation`, or `site:apache.org`
 
-**Step 4:** For foundation-hosted projects, check governance pages:
-- CNCF: WebSearch for `site:cncf.io "{repo}" governance`
-- LF AI: WebSearch for `site:lfaidata.foundation "{repo}" governance`
-- Apache: WebSearch for `site:apache.org "{repo}" governance`
+Temporal verification: <12mo = keep confidence, 12-24mo = downgrade one level, >24mo or undated = Low confidence.
 
-**Step 4.5 (Temporal Verification):** For web search results, verify currency:
-- **< 12 months old:** Keep confidence as determined by data source
-- **12-24 months old:** Downgrade confidence one level
-- **> 24 months old or undated:** Set confidence to **Low** and note age concern
-- Cross-reference against recent commit activity; if a governance member has no commits in 12 months, note potential staleness
-
-**Step 5:** Check the project's README for governance links:
+**Step 4:** Check README for governance links:
 ```bash
 gh api "repos/{owner}/{repo}/contents/README.md" --jq '.content' | base64 -d | head -100
 ```
 
-**Step 6:** Cross-reference all identified governance members against the employee roster.
-
-**Output for KPI 5:** Governance bodies identified (name, type, URL), Red Hat employees in governance positions (name, role, body), evidence (URLs, file paths), confidence level.
-
-**Checkpoint:** Write the complete KPI 5 section to `{workdir}/kpi5-leadership.md`. Then append newly discovered employee contributions to `{workdir}/employee-contribution-map-b.md`.
-
----
-
-## FINAL ASSEMBLY (Agent B)
-
-After all 3 tasks are complete, write the final `{workdir}/employee-contribution-map-b.md` with contributions discovered by this agent. Then assemble and return the full output by reading checkpoint files if needed.
-
----
-
-## OUTPUT FORMAT
-
-```
-# Research Results (Agent B): {owner}/{repo}
-
-## Employee Contribution Map (Agent B)
-
-**KPI Key:** 3 = Maintainership, 4 = Roadmap Influence, 5 = Leadership Roles
-
-| Employee | GitHub | Resolution Tier | Role(s) in Project | KPI(s) Contributing To |
-|----------|--------|----------------|-------------------|----------------------|
-
-## KPI 3: Maintainer/Reviewer/Approver Roles
-- Governance Files Found: {list}
-- Red Hat Employees in Roles: {count}
-- Confidence: {High/Medium/Low}
-- Score: {1-5} ({label})
-
-### Red Hat Governance Roles
-| Employee | GitHub | Resolution Tier | Role | Scope | Source File | Confidence |
-|----------|--------|----------------|------|-------|-------------|------------|
-
-### Evidence
-{List URLs and file paths}
-
-## KPI 4: Roadmap Influence
-- Enhancement Issues Reviewed: {count}
-- Red Hat Authored Proposals: {count}
-- Confidence: {High/Medium/Low}
-- Score: {1-5} ({label})
-
-### Red Hat Led Features
-| Employee | GitHub | Resolution Tier | Issue/Proposal | Title | Status | Confidence |
-|----------|--------|----------------|---------------|-------|--------|------------|
-
-### Evidence
-{List URLs}
-
-## KPI 5: Leadership Roles
-- Governance Bodies Found: {list}
-- Red Hat Members: {count}
-- Confidence: {High/Medium/Low}
-- Score: {1-5} ({label})
-
-### Red Hat Leadership Positions
-| Employee | GitHub | Resolution Tier | Body | Role | Source | Confidence |
-|----------|--------|----------------|------|------|--------|------------|
-
-### Evidence
-{List URLs}
+**Step 5:** Match all identified governance members against roster via python3:
+```bash
+python3 -c "
+import json
+roster = json.load(open('{roster_path}'))
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+name_map = {e['name'].lower(): e for e in roster['employees']}
+# Check governance members against both maps
+governance_members = [
+    # ('name_or_username', 'body', 'role'),
+]
+for name, body, role in governance_members:
+    if name.lower() in gh_users:
+        emp = gh_users[name.lower()]
+        print(f\"  {emp['name']} | @{name} | Tier {emp.get('github_resolution_tier',1)} | {body} | {role}\")
+    elif name.lower() in name_map:
+        emp = name_map[name.lower()]
+        print(f\"  {emp['name']} | (name match) | Low | {body} | {role}\")
+"
 ```
 
----
+**Scoring:** 5=>=2 governance positions incl. chair/lead, 4=Steering/TAC seat, 3=WG/SIG leadership, 2=WG/SIG member, 1=None
 
-## GUIDELINES
+**Checkpoint:** Write complete KPI 5 results to `{workdir}/kpi5-leadership.md` using the Write tool. Include: governance bodies found, RH positions table (Employee | GitHub | Tier | Body | Role | Source | Confidence), score, evidence.
 
-1. **Accuracy over completeness.** Never fabricate data. If you cannot find information, say so clearly and assign Low or Not Found confidence.
-2. **Rate limiting.** If you encounter 403 errors, reduce query sizes and note it in the output. Do not retry excessively.
-3. **Employee matching.** Only match employees to GitHub usernames when you have reasonable confidence.
-4. **Scoring.** Reference the scoring rubric in `assets/scoring-rubric.json` for score thresholds.
-5. **Evidence.** Always include the source URL or command used for each finding.
-6. **Role identification.** Identify ALL roles for each Red Hat employee found contributing.
-7. **Coverage caveat.** If `{resolution_coverage_pct}` is below 70%, append: "Note: GitHub username resolution coverage is {resolution_coverage_pct}% ({resolved_employees}/{total_employees}). Percentage-based metrics may understate Red Hat involvement."
-8. **Context management.** Follow the CONTEXT MANAGEMENT PROTOCOL strictly — pipe large responses to files, write checkpoints, build the contribution map incrementally.
-9. **Do NOT delete** `{workdir}/raw-*.json` or checkpoint files during execution.
-10. **Evaluation window consistency.** KPI 4 uses `{cutoff_date}` for time-series queries. KPIs 3 and 5 query current-state governance without date filtering. If a query hits its safety cap, note potential truncation.
+Return: `"KPI 5 complete. {rh_leadership_count} RH employees in leadership positions. Score: {score}. File: {workdir}/kpi5-leadership.md"`
 
 ### PROMPT END
