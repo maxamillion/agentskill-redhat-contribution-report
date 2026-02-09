@@ -113,7 +113,8 @@ All LDAP queries MUST use GSSAPI authentication (`-Y GSSAPI`). Never use simple 
      '(manager=uid=CURRENT_UID,ou=users,dc=redhat,dc=com)' \
      uid cn mail title rhatSocialURL
    ```
-   - Add each result to the employee roster
+   - Deduplicate by `uid` — if an employee is already in the roster, skip (avoids duplicates from dotted-line reporting or circular references)
+   - Add each new result to the employee roster with a `depth` field tracking the BFS level (manager = 0, direct reports = 1, etc.)
    - Add each result's `uid` to the queue for further traversal
    - Continue until the queue is empty (no more reports found at any level)
 
@@ -151,6 +152,17 @@ Read the scoring rubric from `assets/scoring-rubric.json`.
 For each project, prepare the prompt by substituting:
 - `{owner}` and `{repo}` with the project's owner and repository name
 - `{employee_roster}` with the complete employee roster (formatted as shown in the template)
+- `{resolution_coverage_pct}` with the current GitHub username resolution coverage percentage (resolved / total × 100)
+- `{total_employees}` with the total number of employees in the roster
+- `{resolved_employees}` with the number of employees with resolved GitHub usernames
+
+Include the following ROSTER COVERAGE context block in each sub-agent prompt after the employee roster:
+
+```
+ROSTER COVERAGE: {resolved_employees}/{total_employees} employees have resolved GitHub usernames ({resolution_coverage_pct}%).
+If coverage is below 70%, add an undercount caveat to all percentage-based KPI calculations noting that
+contribution percentages may understate Red Hat involvement due to incomplete username resolution.
+```
 
 **Launch one Task sub-agent per project, ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose`. Each sub-agent evaluates all 5 KPIs for its assigned project.
 
@@ -163,14 +175,33 @@ The 5 KPIs are:
 
 Refer to `references/DATA-SOURCES.md` for the specific `gh` CLI commands each sub-agent should use.
 
-### Phase 5: Result Collection
+### Phase 5: Result Collection & Merge
 
 Collect the output from each sub-agent. Each sub-agent returns:
 - GitHub username resolutions for previously unresolved employees
 - Per-employee contribution map (employee name, GitHub username, roles in the project, KPIs contributed to)
 - Per-KPI findings with scores, evidence, and confidence levels
 
-Merge any newly resolved GitHub usernames back into the master roster.
+#### §5.1 GitHub Username Merge Rules
+
+When multiple sub-agents resolve the same employee to a GitHub username:
+- **Same username, same tier:** Accept — no conflict.
+- **Same username, different tiers:** Keep the highest-tier (most reliable) resolution. Record both tiers in the Data Quality section.
+- **Different usernames, different tiers:** Accept the higher-tier resolution. Discard the lower-tier candidate but note the discrepancy in the Data Quality section.
+- **Different usernames, same tier:** Flag as an unresolvable conflict in the Data Quality section. Do not silently pick one — present both candidates to the user for manual verification. Use the candidate with more evidence (e.g., more commits in the target repos) as the primary, but mark confidence as Low.
+- **Never silently discard** a resolution. All conflicts and resolution decisions must be documented.
+
+#### §5.2 KPI Result Aggregation
+
+- Keep per-project KPI results **separate** — do not average or merge scores across projects.
+- Verify that each sub-agent's assigned score matches the rubric thresholds in `assets/scoring-rubric.json` against the sub-agent's own reported data. If a score appears inconsistent with the data (e.g., score of 4 but data shows < 10% PR contribution), adjust to match the rubric and note the correction.
+
+#### §5.3 Post-Merge Coverage Update
+
+After merging all newly resolved usernames from sub-agents:
+- Recalculate the resolution coverage percentage.
+- If coverage improved significantly (> 10 percentage points), note this in the Data Quality section.
+- If coverage remains below 70%, ensure the undercount caveat appears in the final report.
 
 ### Phase 6: Report Generation
 
