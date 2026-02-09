@@ -145,7 +145,7 @@ Report the current resolution state to the user before proceeding.
 
 ### Phase 4: Parallel Per-Project Research
 
-Read the sub-agent prompt template from `references/RESEARCH-PROMPTS.md`.
+Read the Agent A and Agent B prompt templates from `references/RESEARCH-PROMPTS.md`.
 
 Read the scoring rubric from `assets/scoring-rubric.json`.
 
@@ -177,32 +177,44 @@ If coverage is below 70%, add an undercount caveat to all percentage-based KPI c
 contribution percentages may understate Red Hat involvement due to incomplete username resolution.
 ```
 
-**Launch one Task sub-agent per project, ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose`. Each sub-agent evaluates all 5 KPIs for its assigned project.
+**Launch two Task sub-agents per project (Agent A and Agent B), ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose`. For N projects, this means 2N Task calls in a single message.
 
-The 5 KPIs are:
-1. **PR/Commit Contributions** — PRs, commits, code contributions authored or co-authored by roster employees
-2. **Release Management** — Release managers who are roster employees
-3. **Maintainer/Reviewer/Approver Roles** — Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files
-4. **Roadmap Influence** — Enhancement proposals, roadmap features, or design docs led by roster employees
-5. **Leadership Roles** — TAC, steering committee, advisory board, or other governance body positions held by roster employees
+- **Agent A** (per project): Username Resolution + KPI 1 (PR/Commit Contributions) + KPI 2 (Release Management)
+- **Agent B** (per project): KPI 3 (Maintainer/Reviewer/Approver Roles) + KPI 4 (Roadmap Influence) + KPI 5 (Leadership Roles)
+
+Both agents for the same project share the same `{workdir}`, `{employee_roster}`, `{cutoff_date}`, and scoring rubric substitutions. Agent A uses the "Agent A" prompt template; Agent B uses the "Agent B" prompt template.
+
+The 5 KPIs across both agents are:
+1. **PR/Commit Contributions** (Agent A) — PRs, commits, code contributions authored or co-authored by roster employees
+2. **Release Management** (Agent A) — Release managers who are roster employees
+3. **Maintainer/Reviewer/Approver Roles** (Agent B) — Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files
+4. **Roadmap Influence** (Agent B) — Enhancement proposals, roadmap features, or design docs led by roster employees
+5. **Leadership Roles** (Agent B) — TAC, steering committee, advisory board, or other governance body positions held by roster employees
 
 Refer to `references/DATA-SOURCES.md` for the specific `gh` CLI commands each sub-agent should use.
 
 ### Phase 5: Result Collection & Merge
 
-Collect the output from each sub-agent. Each sub-agent returns:
-- GitHub username resolutions for previously unresolved employees
-- Per-employee contribution map (employee name, GitHub username, roles in the project, KPIs contributed to)
-- Per-KPI findings with scores, evidence, and confidence levels
+Collect the output from all sub-agents. There are **2 sub-agents per project** (2N total for N projects):
+
+- **Agent A** returns: GitHub username resolutions, KPI 1 (PR/Commit Contributions), KPI 2 (Release Management), and its portion of the employee contribution map
+- **Agent B** returns: KPI 3 (Maintainership), KPI 4 (Roadmap Influence), KPI 5 (Leadership Roles), and its portion of the employee contribution map
+
+Username resolution merging (§5.1) uses data from Agent A only. KPI 1-2 results come from Agent A; KPI 3-5 results come from Agent B. Merge both agents' employee contribution maps into a single per-project map.
 
 **Fallback to checkpoint files:** If a sub-agent returned incomplete results or failed (e.g., due to context exhaustion), read whatever intermediate checkpoint files it wrote in `reports/tmp/{owner}-{repo}/`:
+
+Agent A checkpoints:
 - `task1-username-resolutions.md` — GitHub username resolutions
 - `kpi1-pr-contributions.md` — KPI 1 results
 - `kpi2-release-management.md` — KPI 2 results
+- `employee-contribution-map.md` — Agent A employee contribution map
+
+Agent B checkpoints:
 - `kpi3-maintainership.md` — KPI 3 results
 - `kpi4-roadmap-influence.md` — KPI 4 results
 - `kpi5-leadership.md` — KPI 5 results
-- `employee-contribution-map.md` — Employee contribution map
+- `employee-contribution-map-b.md` — Agent B employee contribution map
 
 Use whatever checkpoint files exist to fill in gaps in the sub-agent's returned output. If a checkpoint file exists for a KPI that the sub-agent didn't return results for, use the checkpoint data directly. Note in the Data Quality section which KPIs were recovered from checkpoints.
 
