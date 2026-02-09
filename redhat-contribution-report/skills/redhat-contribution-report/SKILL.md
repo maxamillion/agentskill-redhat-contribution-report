@@ -7,7 +7,7 @@ metadata:
   author: Adam Miller
   email: admiller@redhat.com
   version: "1.0"
-allowed-tools: Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*) Bash(git log:*) Bash(git clone:*) Bash(git remote:*) Bash(mkdir:*) Bash(python3:*) Bash(date:*) Read Glob Grep Task WebSearch WebFetch
+allowed-tools: Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*) Bash(git log:*) Bash(git clone:*) Bash(git remote:*) Bash(mkdir:*) Bash(python3:*) Bash(date:*) Bash(rm:*) Bash(grep:*) Read Glob Grep Task WebSearch WebFetch Write
 ---
 
 # Red Hat Open Source Contribution Evaluation
@@ -149,8 +149,15 @@ Read the sub-agent prompt template from `references/RESEARCH-PROMPTS.md`.
 
 Read the scoring rubric from `assets/scoring-rubric.json`.
 
+**Create working directories** for each project's intermediate files:
+```bash
+mkdir -p reports/tmp/{owner}-{repo}/
+```
+Run this for every project before dispatching sub-agents. These directories hold raw API output, checkpoint files, and the incremental employee contribution map.
+
 For each project, prepare the prompt by substituting:
 - `{owner}` and `{repo}` with the project's owner and repository name
+- `{workdir}` with the working directory path: `reports/tmp/{owner}-{repo}`
 - `{employee_roster}` with the complete employee roster (formatted as shown in the template)
 - `{resolution_coverage_pct}` with the current GitHub username resolution coverage percentage (resolved / total × 100)
 - `{total_employees}` with the total number of employees in the roster
@@ -181,6 +188,17 @@ Collect the output from each sub-agent. Each sub-agent returns:
 - GitHub username resolutions for previously unresolved employees
 - Per-employee contribution map (employee name, GitHub username, roles in the project, KPIs contributed to)
 - Per-KPI findings with scores, evidence, and confidence levels
+
+**Fallback to checkpoint files:** If a sub-agent returned incomplete results or failed (e.g., due to context exhaustion), read whatever intermediate checkpoint files it wrote in `reports/tmp/{owner}-{repo}/`:
+- `task1-username-resolutions.md` — GitHub username resolutions
+- `kpi1-pr-contributions.md` — KPI 1 results
+- `kpi2-release-management.md` — KPI 2 results
+- `kpi3-maintainership.md` — KPI 3 results
+- `kpi4-roadmap-influence.md` — KPI 4 results
+- `kpi5-leadership.md` — KPI 5 results
+- `employee-contribution-map.md` — Employee contribution map
+
+Use whatever checkpoint files exist to fill in gaps in the sub-agent's returned output. If a checkpoint file exists for a KPI that the sub-agent didn't return results for, use the checkpoint data directly. Note in the Data Quality section which KPIs were recovered from checkpoints.
 
 #### §5.1 GitHub Username Merge Rules
 
@@ -232,7 +250,12 @@ Generate the final report by:
    ```
    Use the Write tool to save the report.
 
-5. Inform the user of the report location and summarize key findings.
+5. Clean up intermediate files:
+   ```bash
+   rm -rf reports/tmp/
+   ```
+
+6. Inform the user of the report location and summarize key findings.
 
 ## Error Handling
 
