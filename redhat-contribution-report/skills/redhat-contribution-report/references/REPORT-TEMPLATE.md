@@ -48,6 +48,8 @@ Use this template to generate the final evaluation report. Replace all `{placeho
 
 ### Red Hat Employee Contributions
 
+**KPI Key:** 1 = PR/Commit Contributions, 2 = Release Management, 3 = Maintainership, 4 = Roadmap Influence, 5 = Leadership Roles
+
 | Employee | GitHub Username | Role(s) in Project | KPI(s) |
 |----------|---------------|-------------------|--------|
 | {name} | @{github} | {maintainer, reviewer, release manager, etc.} | {1,2,3} |

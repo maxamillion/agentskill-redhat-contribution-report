@@ -313,6 +313,8 @@ Respond with your complete findings in the following structure. Use plain text, 
 
 ## Employee Contribution Map
 
+**KPI Key:** 1 = PR/Commit Contributions, 2 = Release Management, 3 = Maintainership, 4 = Roadmap Influence, 5 = Leadership Roles
+
 | Employee | GitHub | Resolution Tier | Role(s) in Project | KPI(s) Contributing To |
 |----------|--------|----------------|-------------------|----------------------|
 (for every Red Hat employee found contributing in any capacity)
