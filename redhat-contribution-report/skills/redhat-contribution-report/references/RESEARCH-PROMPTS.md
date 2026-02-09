@@ -2,7 +2,7 @@
 
 ## Per-Project Research Agent Prompt
 
-Use this prompt template for each per-project sub-agent launched in Phase 4. Replace `{owner}`, `{repo}`, and `{employee_roster}` with actual values before dispatching.
+Use this prompt template for each per-project sub-agent launched in Phase 4. Replace `{owner}`, `{repo}`, `{cutoff_date}`, and `{employee_roster}` with actual values before dispatching.
 
 ---
 
@@ -15,6 +15,10 @@ You are a data collection and analysis agent. Your task is to evaluate Red Hat e
 **WORKING DIRECTORY:** {workdir}
 
 All intermediate files, raw API output, and checkpoint files for this project must be written under this directory. It has already been created by the orchestrator.
+
+**EVALUATION WINDOW:** {cutoff_date} to present (6 months)
+
+All time-series queries (KPIs 1, 2, 4) must use `{cutoff_date}` as the start date to ensure a consistent 6-month evaluation window. The `--limit` parameter is retained as a safety cap. Current-state queries (KPIs 3, 5) and username resolution (Task 1) are not date-filtered.
 
 **RED HAT EMPLOYEE ROSTER:**
 
@@ -149,9 +153,10 @@ A finding is only as reliable as its weakest link. The resolution tier of the em
 
 Measure pull requests and commits authored or co-authored by Red Hat employees.
 
-**Step 1:** Fetch recent merged PRs to a file (do NOT let raw JSON into context):
+**Step 1:** Fetch merged PRs within the evaluation window to a file (do NOT let raw JSON into context):
 ```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 500 --json number,author,mergedAt \
+gh pr list --repo {owner}/{repo} --state merged --limit 500 \
+  --search "merged:>{cutoff_date}" --json number,author,mergedAt \
   > {workdir}/raw-prs.json
 ```
 
@@ -166,6 +171,8 @@ if total == 0:
 dates = sorted([pr['mergedAt'] for pr in data if pr.get('mergedAt')])
 print(f'Total merged PRs: {total}')
 print(f'Date range: {dates[0][:10]} to {dates[-1][:10]}')
+if total >= 500:
+    print('WARNING: Safety cap of 500 reached — results may be truncated')
 authors = {}
 for pr in data:
     login = pr.get('author',{}).get('login','')
@@ -177,21 +184,22 @@ for a, c in sorted(authors.items(), key=lambda x: -x[1])[:50]:
 
 **Step 2:** From the summary output, identify which authors match employees in the roster (match against `github_username` values). Count total merged PRs and Red Hat authored PRs.
 
-**Step 2.5 (Sampling Window):** Record the oldest and newest `mergedAt` timestamps from the PR sample. Calculate the sample window in months.
-- If the sample covers **< 12 months**, add a caveat noting this is a high-velocity project and the 500-PR sample may represent a shorter evaluation period than expected.
-- If the sample covers **< 6 months**, recommend in the output that a longer historical analysis may be needed for an accurate picture and note the limited window prominently in the Evaluation Period field.
-- Always report the exact date range in the "Evaluation Period" output field (e.g., "2024-03-15 to 2025-01-20 (10 months)").
+**Step 2.5 (Evaluation Window Verification):** Check whether the safety cap of 500 PRs was hit.
+- If the result count equals 500, note in the output that the safety cap was reached and results may not cover the full 6-month evaluation window. Report the actual date range of returned results alongside the intended window.
+- If the result count is below 500, the full 6-month window is covered.
+- Always report the evaluation period as `{cutoff_date} to present (6 months)` in the output, with a truncation note if the safety cap was hit.
 
-**Step 3:** For each matched employee, get their PR count (save to file if large):
+**Step 3:** For each matched employee, get their PR count within the evaluation window (save to file if large):
 ```bash
-gh pr list --repo {owner}/{repo} --state merged --author {github_username} --limit 200 --json number,mergedAt \
+gh pr list --repo {owner}/{repo} --state merged --author {github_username} --limit 200 \
+  --search "merged:>{cutoff_date}" --json number,mergedAt \
   > {workdir}/raw-prs-{github_username}.json
 python3 -c "import json; data=json.load(open('{workdir}/raw-prs-{github_username}.json')); print(f'{len(data)} PRs')"
 ```
 
-**Step 4:** Check for co-authored commits. Save raw output to file and extract matches:
+**Step 4:** Check for co-authored commits within the evaluation window. Save raw output to file and extract matches:
 ```bash
-gh api "repos/{owner}/{repo}/commits?per_page=100" --paginate \
+gh api "repos/{owner}/{repo}/commits?per_page=100&since={cutoff_date}T00:00:00Z" --paginate \
   --jq '.[].commit.message' > {workdir}/raw-commit-messages.txt
 grep -i "co-authored-by" {workdir}/raw-commit-messages.txt | sort | uniq -c | sort -rn | head -20
 ```
@@ -217,24 +225,26 @@ Identify Red Hat employees responsible for project releases.
 gh release list --repo {owner}/{repo} --limit 50
 ```
 
-**Step 2:** Get release details with author information (save to file):
+**Step 2:** Get release details with author information (save to file), then filter to the evaluation window:
 ```bash
 gh api "repos/{owner}/{repo}/releases" --paginate \
   > {workdir}/raw-releases.json
 python3 -c "
 import json
 data = json.load(open('{workdir}/raw-releases.json'))
+data = [r for r in data if r.get('published_at','') >= '{cutoff_date}']
 for r in data:
     author = r.get('author',{}).get('login','unknown')
     print(f\"{r.get('tag_name','')} | {author} | {r.get('published_at','')[:10]} | {r.get('html_url','')}\")
+print(f'Total releases in evaluation window: {len(data)}')
 "
 ```
 
-**Step 2.5 (Bot Filtering):** Before attributing release management, filter out CI bot accounts. Exclude any `author.login` that:
+**Step 2.5 (Bot Filtering):** Before attributing release management, apply date pre-filtering and filter out CI bot accounts. First, restrict to releases published on or after `{cutoff_date}`. Then exclude any `author.login` that:
 - Ends with `[bot]`
 - Matches known CI bot accounts: `github-actions`, `dependabot`, `renovate`, `mergify`, `semantic-release-bot`, `release-please`, `goreleaser`, `pypi-bot`
 
-If all releases are authored by bots, note that the project uses automated release pipelines and proceed to Steps 3.5-3.7 to identify human release managers.
+If all releases in the evaluation window are authored by bots, note that the project uses automated release pipelines and proceed to Steps 3.5-3.7 to identify human release managers.
 
 **Step 3:** Cross-reference release authors (after bot filtering) against the employee roster.
 
@@ -332,9 +342,10 @@ gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(
 
 Identify Red Hat employees leading or influencing project roadmap features.
 
-**Step 1:** Search for enhancement/feature issues and proposals (save to file if results are large):
+**Step 1:** Search for enhancement/feature issues and proposals within the evaluation window (save to file if results are large):
 ```bash
-gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 --json number,title,author,state,url \
+gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 \
+  --search "created:>{cutoff_date}" --json number,title,author,state,url \
   > {workdir}/raw-enhancement-issues.json
 python3 -c "
 import json
@@ -355,9 +366,9 @@ gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(
 
 **Step 3:** Cross-reference issue authors and proposal authors against the employee roster.
 
-**Step 4:** Search for discussions or milestone planning:
+**Step 4:** Search for discussions or milestone planning within the evaluation window:
 ```bash
-gh search issues --repo {owner}/{repo} "roadmap OR proposal OR design OR feature request" --limit 50 --json number,title,author,url
+gh search issues --repo {owner}/{repo} "roadmap OR proposal OR design OR feature request created:>{cutoff_date}" --limit 50 --json number,title,author,url
 ```
 
 **Output for KPI 4:**
@@ -451,7 +462,7 @@ Respond with your complete findings in the following structure. Use plain text, 
 ## KPI 1: PR/Commit Contributions
 - Total Merged PRs Sampled: {count}
 - Red Hat Authored: {count} ({percentage}%)
-- Evaluation Period: {date range from oldest to newest in sample}
+- Evaluation Period: {cutoff_date} to present (6 months)
 - Confidence: {High/Medium/Low}
 - Score: {1-5} ({label from scoring rubric})
 
@@ -528,5 +539,6 @@ Respond with your complete findings in the following structure. Use plain text, 
 7. **Coverage caveat.** If `{resolution_coverage_pct}` is below 70%, append an undercount caveat to all percentage-based KPI calculations (e.g., KPI 1 PR percentage). The caveat should state: "Note: GitHub username resolution coverage is {resolution_coverage_pct}% ({resolved_employees}/{total_employees}). Percentage-based metrics may understate Red Hat involvement due to incomplete username resolution."
 8. **Context management.** Follow the CONTEXT MANAGEMENT PROTOCOL strictly. Always pipe large API responses to files, always write checkpoints after each task, and always build the employee contribution map incrementally. These rules prevent context exhaustion and data loss.
 9. **Cleanup of raw files.** Do NOT delete `{workdir}/raw-*.json` or checkpoint files during execution. The orchestrator handles cleanup after collecting results.
+10. **Evaluation window consistency.** All time-series KPIs (1, 2, 4) must use `{cutoff_date}` as the start date for queries. Current-state KPIs (3, 5) query governance files and leadership positions without date filtering. Username resolution (Task 1) intentionally searches all-time history to maximize coverage. If a query hits its safety cap (`--limit`), note the potential truncation in the output.
 
 ### PROMPT END

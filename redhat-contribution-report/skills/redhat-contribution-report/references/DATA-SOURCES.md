@@ -2,6 +2,12 @@
 
 All GitHub data collection uses the `gh` CLI tool exclusively. Never use raw API calls with curl or direct HTTP requests to avoid authentication token management.
 
+## Evaluation Window
+
+All time-series queries use `{cutoff_date}` (a `YYYY-MM-DD` date 6 months before the evaluation date) to bound results to a consistent 6-month evaluation window. The `--limit` parameter is retained as a safety cap to prevent unbounded queries on very high-velocity repositories, but date filtering is the primary mechanism for scoping results. If a query hits the safety cap, the sub-agent should note potential truncation in its findings.
+
+Time-series KPIs (1, 2, 4) use date-filtered queries. Current-state KPIs (3, 5) query governance files and leadership positions without date filtering, as these represent point-in-time snapshots. Username resolution (Task 1) intentionally searches all-time history to maximize coverage.
+
 ## KPI 1: PR/Commit Contributions
 
 ### Bulk PR List (Preferred - avoids per-author rate limit pressure)
@@ -10,6 +16,7 @@ Fetch all recent merged PRs for a repository and filter locally:
 
 ```bash
 gh pr list --repo {owner}/{repo} --state merged --limit 500 \
+  --search "merged:>{cutoff_date}" \
   --json number,title,author,mergedAt,url
 ```
 
@@ -18,14 +25,16 @@ Cross-reference the `author.login` field against the employee roster GitHub user
 ### Per-Author PR Search (Use sparingly)
 
 ```bash
-gh search prs --author {github_username} --repo {owner}/{repo} --merged --limit 100 \
+gh search prs --author {github_username} --repo {owner}/{repo} --merged \
+  --merged ">={cutoff_date}" --limit 100 \
   --json number,title,repository,updatedAt,url
 ```
 
 ### Commit Search by Author
 
 ```bash
-gh search commits --author {github_username} --repo {owner}/{repo} --limit 100 \
+gh search commits --author {github_username} --repo {owner}/{repo} \
+  --author-date ">={cutoff_date}" --limit 100 \
   --json sha,commit,repository,url
 ```
 
@@ -34,7 +43,7 @@ gh search commits --author {github_username} --repo {owner}/{repo} --limit 100 \
 Search for co-authored-by trailers in commit messages:
 
 ```bash
-gh api repos/{owner}/{repo}/commits --paginate --jq '.[].commit.message' | \
+gh api "repos/{owner}/{repo}/commits?since={cutoff_date}T00:00:00Z" --paginate --jq '.[].commit.message' | \
   grep -i "co-authored-by.*{employee_name_or_email}"
 ```
 
@@ -43,7 +52,8 @@ gh api repos/{owner}/{repo}/commits --paginate --jq '.[].commit.message' | \
 **Primary method:** Search the full commit history via GitHub API without cloning:
 
 ```bash
-gh search commits --author-email "{employee_email}" --repo {owner}/{repo} --limit 200 \
+gh search commits --author-email "{employee_email}" --repo {owner}/{repo} \
+  --author-date ">={cutoff_date}" --limit 200 \
   --json sha,commit,author,repository
 ```
 
@@ -55,7 +65,7 @@ If the employee has commits, extract their GitHub username from the `author.logi
 
 ```bash
 git clone --depth 500 --filter=blob:none https://github.com/{owner}/{repo}.git /tmp/{repo}
-git -C /tmp/{repo} log --all --format='%ae|%an|%H|%s' | grep -i '@redhat.com'
+git -C /tmp/{repo} log --all --since="{cutoff_date}" --format='%ae|%an|%H|%s' | grep -i '@redhat.com'
 ```
 
 The depth is set to 500 (up from 100) to improve coverage for high-velocity repositories.
@@ -66,14 +76,24 @@ The depth is set to 500 (up from 100) to improve coverage for high-velocity repo
 
 ```bash
 gh api repos/{owner}/{repo}/releases --paginate \
-  --jq '.[] | {tag: .tag_name, author: .author.login, name: .name, date: .published_at, url: .html_url}'
+  --jq '[.[] | select(.published_at >= "{cutoff_date}")] | .[] | {tag: .tag_name, author: .author.login, name: .name, date: .published_at, url: .html_url}'
 ```
 
 ### Release Tags with Authors
 
 ```bash
-gh release list --repo {owner}/{repo} --limit 50 \
+gh release list --repo {owner}/{repo} --limit 100 \
   --json tagName,author,publishedAt,isLatest
+```
+
+Post-filter by date using python since `gh release list` has no server-side date filter:
+```bash
+python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+filtered = [r for r in data if r.get('publishedAt','') >= '{cutoff_date}']
+json.dump(filtered, sys.stdout, indent=2)
+"
 ```
 
 Cross-reference `author.login` with employee roster to identify Red Hat release managers.
@@ -84,7 +104,7 @@ Many releases are created by CI bots, not human release managers. Filter out bot
 
 ```bash
 gh api "repos/{owner}/{repo}/releases" --paginate \
-  --jq '[.[] | select(.author.login | test("\\[bot\\]$") | not) | select(.author.login | IN("github-actions", "dependabot", "renovate", "mergify", "semantic-release-bot", "release-please", "goreleaser", "pypi-bot") | not) | {tag: .tag_name, author: .author.login, date: .published_at}]'
+  --jq '[.[] | select(.published_at >= "{cutoff_date}") | select(.author.login | test("\\[bot\\]$") | not) | select(.author.login | IN("github-actions", "dependabot", "renovate", "mergify", "semantic-release-bot", "release-please", "goreleaser", "pypi-bot") | not) | {tag: .tag_name, author: .author.login, date: .published_at}]'
 ```
 
 If all releases are authored by bots, the project likely uses automated release pipelines. In that case:
@@ -178,6 +198,7 @@ Note: This shows contributors by commit count, not necessarily write access. Wri
 
 ```bash
 gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 \
+  --search "created:>{cutoff_date}" \
   --json number,title,author,state,labels,url
 ```
 
@@ -202,7 +223,7 @@ gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" \
 ### Issue Search for Roadmap Discussions
 
 ```bash
-gh search issues --repo {owner}/{repo} "roadmap OR proposal OR enhancement OR design" \
+gh search issues --repo {owner}/{repo} "roadmap OR proposal OR enhancement OR design created:>{cutoff_date}" \
   --limit 50 --json number,title,author,url
 ```
 

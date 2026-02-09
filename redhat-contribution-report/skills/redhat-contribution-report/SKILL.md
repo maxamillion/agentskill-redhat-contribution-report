@@ -155,9 +155,15 @@ mkdir -p reports/tmp/{owner}-{repo}/
 ```
 Run this for every project before dispatching sub-agents. These directories hold raw API output, checkpoint files, and the incremental employee contribution map.
 
+**Compute the evaluation window cutoff date** (6 months ago from today):
+```bash
+cutoff_date=$(date -d '6 months ago' +%Y-%m-%d)
+```
+
 For each project, prepare the prompt by substituting:
 - `{owner}` and `{repo}` with the project's owner and repository name
 - `{workdir}` with the working directory path: `reports/tmp/{owner}-{repo}`
+- `{cutoff_date}` with the computed 6-month-ago date in `YYYY-MM-DD` format
 - `{employee_roster}` with the complete employee roster (formatted as shown in the template)
 - `{resolution_coverage_pct}` with the current GitHub username resolution coverage percentage (resolved / total × 100)
 - `{total_employees}` with the total number of employees in the roster
