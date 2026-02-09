@@ -38,14 +38,27 @@ gh api repos/{owner}/{repo}/commits --paginate --jq '.[].commit.message' | \
   grep -i "co-authored-by.*{employee_name_or_email}"
 ```
 
-### Git Log Email Matching (Fallback for unresolved employees)
+### Git Log Email Matching (Tier 2 — for unresolved employees)
 
-Clone the repo (shallow) and search by email domain:
+**Primary method:** Search the full commit history via GitHub API without cloning:
 
 ```bash
-git clone --depth 100 --filter=blob:none https://github.com/{owner}/{repo}.git /tmp/{repo}
+gh search commits --author-email "{employee_email}" --repo {owner}/{repo} --limit 200 \
+  --json sha,commit,author,repository
+```
+
+Note: `gh search commits --author-email` requires an exact email address, not a suffix pattern. Run this once per unresolved employee using their `@redhat.com` email from the roster.
+
+If the employee has commits, extract their GitHub username from the `author.login` field of the results.
+
+**Fallback method:** If `gh search commits` returns no results or hits rate limits, clone with deeper history:
+
+```bash
+git clone --depth 500 --filter=blob:none https://github.com/{owner}/{repo}.git /tmp/{repo}
 git -C /tmp/{repo} log --all --format='%ae|%an|%H|%s' | grep -i '@redhat.com'
 ```
+
+The depth is set to 500 (up from 100) to improve coverage for high-velocity repositories.
 
 ## KPI 2: Release Management
 
@@ -64,6 +77,46 @@ gh release list --repo {owner}/{repo} --limit 50 \
 ```
 
 Cross-reference `author.login` with employee roster to identify Red Hat release managers.
+
+### Bot Filtering
+
+Many releases are created by CI bots, not human release managers. Filter out bot accounts before attribution:
+
+```bash
+gh api "repos/{owner}/{repo}/releases" --paginate \
+  --jq '[.[] | select(.author.login | test("\\[bot\\]$") | not) | select(.author.login | IN("github-actions", "dependabot", "renovate", "mergify", "semantic-release-bot", "release-please", "goreleaser", "pypi-bot") | not) | {tag: .tag_name, author: .author.login, date: .published_at}]'
+```
+
+If all releases are authored by bots, the project likely uses automated release pipelines. In that case:
+1. Do not attribute release management to the bot
+2. Proceed to "Release Notes Human Attribution Search" and "Pre-Release PR Merger" below to identify human release managers
+
+### Release Notes Human Attribution Search
+
+Search release bodies for explicit human attribution patterns:
+
+```bash
+gh api "repos/{owner}/{repo}/releases" --paginate \
+  --jq '.[] | select(.body != null) | {tag: .tag_name, body: .body}' | \
+  grep -i -E "release managed by|release captain|release lead|release manager|cut by|prepared by|coordinated by"
+```
+
+Cross-reference any names or usernames found against the employee roster.
+
+### Pre-Release PR Merger
+
+Identify who merged the last PRs before each release tag as a secondary signal for release involvement:
+
+```bash
+gh api "repos/{owner}/{repo}/releases?per_page=10" --jq '.[].tag_name' | while read tag; do
+  echo "=== Release: $tag ==="
+  gh pr list --repo {owner}/{repo} --state merged --base main --limit 5 \
+    --json number,title,author,mergedBy,mergedAt \
+    --jq "sort_by(.mergedAt) | reverse | .[:5]"
+done
+```
+
+Cross-reference `mergedBy.login` against the employee roster. Frequent pre-release mergers may indicate release management responsibility even when releases are cut by bots.
 
 ### Release Notes Content
 
