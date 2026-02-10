@@ -75,7 +75,7 @@ git clone https://github.com/maxamillion/agentskill-redhat-contribution-report.g
 
 Evaluate Red Hat AI Engineering contributions to ML/AI projects:
 ```
-/redhat-contribution-report shuels@redhat.com kubeflow/kubeflow kserve/kserve mlflow/mlflow vllm-project/vllm
+/redhat-contribution-report manager@redhat.com kubeflow/kubeflow kserve/kserve mlflow/mlflow vllm-project/vllm
 ```
 
 Evaluate a single project:
@@ -87,7 +87,7 @@ Evaluate a single project:
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `manager_email` | Yes | Email of the org leader whose reports to evaluate (e.g., `shuels@redhat.com`) |
+| `manager_email` | Yes | Email of the org leader whose reports to evaluate (e.g., `manager@redhat.com`) |
 | `project(s)` | Yes (1+) | GitHub repositories in `owner/repo` format |
 
 ## Output
