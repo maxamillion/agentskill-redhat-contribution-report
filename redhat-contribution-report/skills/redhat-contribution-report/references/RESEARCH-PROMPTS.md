@@ -91,7 +91,7 @@ You evaluate Red Hat employee PR/commit contributions for one open source projec
 
 **Step 1:** Fetch merged PRs to a file:
 ```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 500 \
+gh pr list --repo {owner}/{repo} --state merged --limit 10000 \
   --search "merged:>{cutoff_date}" --json number,author,mergedAt \
   > {workdir}/raw-prs.json
 ```
@@ -115,7 +115,7 @@ rh_total = sum(v['count'] for v in rh_prs.values())
 pct = round(rh_total/total*100,1) if total else 0
 print(f'Total merged PRs: {total}')
 print(f'Red Hat authored: {rh_total} ({pct}%)')
-if total >= 500: print('WARNING: Safety cap reached, may be truncated')
+if total >= 10000: print('WARNING: Result limit reached, data may be incomplete')
 for login, info in sorted(rh_prs.items(), key=lambda x:-x[1]['count']):
     print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {info['count']} PRs\")
 print(f'Resolution coverage: {roster[\"resolution_coverage_pct\"]}%')
@@ -254,7 +254,7 @@ You evaluate Red Hat employee roadmap influence in one open source project.
 
 **Step 1:** Fetch enhancement/feature issues (try labels: enhancement, feature, feature-request, proposal, roadmap, rfe, design, kep):
 ```bash
-gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 \
+gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 5000 \
   --search "created:>{cutoff_date}" --json number,title,author,state,url \
   > {workdir}/raw-enhancement-issues.json
 ```
@@ -286,7 +286,7 @@ gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" --jq '.tree[] | select(
 
 **Step 4:** Search for broader roadmap discussions:
 ```bash
-gh search issues --repo {owner}/{repo} "roadmap OR proposal OR design OR feature request created:>{cutoff_date}" --limit 50 --json number,title,author,url
+gh search issues --repo {owner}/{repo} "roadmap OR proposal OR design OR feature request created:>{cutoff_date}" --limit 1000 --json number,title,author,url
 ```
 
 **Scoring:** 5=RH leads multiple roadmap features + strategic planning, 4=RH leads >=1 major feature, 3=RH actively contributes to features/proposals, 2=RH participates in discussions but doesn't lead, 1=None

@@ -4,7 +4,7 @@ All GitHub data collection uses the `gh` CLI tool exclusively. Never use raw API
 
 ## Evaluation Window
 
-All time-series queries use `{cutoff_date}` (a `YYYY-MM-DD` date 6 months before the evaluation date) to bound results to a consistent 6-month evaluation window. The `--limit` parameter is retained as a safety cap to prevent unbounded queries on very high-velocity repositories, but date filtering is the primary mechanism for scoping results. If a query hits the safety cap, the sub-agent should note potential truncation in its findings.
+All time-series queries use `{cutoff_date}` (a `YYYY-MM-DD` date 6 months before the evaluation date) to bound results to a consistent 6-month evaluation window. The `--limit` parameter is set high enough to capture all results within the date-filtered window. Date filtering is the sole mechanism for scoping results.
 
 Time-series KPIs (1, 2, 4) use date-filtered queries. Current-state KPIs (3, 5) query governance files and leadership positions without date filtering, as these represent point-in-time snapshots. Username resolution (Task 1) intentionally searches all-time history to maximize coverage.
 
@@ -15,18 +15,18 @@ Time-series KPIs (1, 2, 4) use date-filtered queries. Current-state KPIs (3, 5) 
 Fetch all recent merged PRs for a repository and filter locally:
 
 ```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 500 \
+gh pr list --repo {owner}/{repo} --state merged --limit 10000 \
   --search "merged:>{cutoff_date}" \
   --json number,title,author,mergedAt,url
 ```
 
 Cross-reference the `author.login` field against the employee roster GitHub usernames.
 
-### Per-Author PR Search (Use sparingly)
+### Per-Author PR Search
 
 ```bash
 gh search prs --author {github_username} --repo {owner}/{repo} --merged \
-  --merged ">={cutoff_date}" --limit 100 \
+  --merged ">={cutoff_date}" --limit 500 \
   --json number,title,repository,updatedAt,url
 ```
 
@@ -197,7 +197,7 @@ Note: This shows contributors by commit count, not necessarily write access. Wri
 ### Enhancement/Feature Issues
 
 ```bash
-gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 100 \
+gh issue list --repo {owner}/{repo} --label "enhancement" --state all --limit 5000 \
   --search "created:>{cutoff_date}" \
   --json number,title,author,state,labels,url
 ```
@@ -224,7 +224,7 @@ gh api "repos/{owner}/{repo}/git/trees/HEAD?recursive=1" \
 
 ```bash
 gh search issues --repo {owner}/{repo} "roadmap OR proposal OR enhancement OR design created:>{cutoff_date}" \
-  --limit 50 --json number,title,author,url
+  --limit 1000 --json number,title,author,url
 ```
 
 ## KPI 5: Leadership Roles
@@ -281,7 +281,7 @@ If any `gh` command returns a 403 error or rate limit message:
 
 - Prefer `gh pr list` (bulk) over `gh search prs` (per-author) when possible
 - Batch API calls using `--paginate` instead of manual pagination
-- Use `--limit` to cap results at reasonable levels (100-500)
+- Use `--limit` to cap results at levels that capture the full date-filtered window
 - For large employee rosters (>50), focus on employees with resolved GitHub usernames first
 
 ## Output Parsing Notes
