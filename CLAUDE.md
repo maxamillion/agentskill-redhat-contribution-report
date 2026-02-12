@@ -18,7 +18,7 @@ The skill runs a 7-phase sequential workflow orchestrated by SKILL.md:
 2. **LDAP traversal** — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`); writes roster to `reports/tmp/employee-roster.json`
 3. **Resolution summary** — report LDAP-resolved (Tier 1) vs unresolved employees
 3.5. **Centralized username resolution** — single dedicated sub-agent resolves GitHub usernames across all target projects; updates roster JSON in place
-4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message with `max_turns: 8`
+4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message (KPI 1 uses `max_turns: 12`; KPIs 2-5 use `max_turns: 8`)
 5. **Result collection** — read 5 checkpoint files per project from `reports/tmp/{owner}-{repo}/`; no inline roster merging needed
 6. **Report generation** — markdown report to `reports/YYYY-MM-DD-redhat-contribution-eval.md`
 

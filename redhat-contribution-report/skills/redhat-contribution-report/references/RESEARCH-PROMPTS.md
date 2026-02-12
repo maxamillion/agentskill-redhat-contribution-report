@@ -89,49 +89,202 @@ You evaluate Red Hat employee PR/commit contributions for one open source projec
 
 **TARGET:** {owner}/{repo} | **WINDOW:** {cutoff_date} to present | **WORKDIR:** {workdir} | **ROSTER:** {roster_path}
 
-**Step 1:** Fetch merged PRs to a file:
-```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 10000 \
-  --search "merged:>{cutoff_date}" --json number,author,mergedAt \
-  > {workdir}/raw-prs.json
-```
+**Step 0 — Workflow Detection:**
 
-**Step 2:** Match against roster via python3 (keeps roster out of context):
+Some repos use non-standard merge workflows (e.g., pytorch's `pytorchmergebot` lands commits directly and **closes** the PR instead of merging via GitHub). Additionally, GitHub's Search API caps results at 1000 regardless of `--limit`. Detect the workflow before fetching PRs:
+
 ```bash
 python3 -c "
-import json
+import subprocess, json
+
+def search_count(q):
+    r = subprocess.run(['gh','api','search/issues','-X','GET',
+        '-f',f'q={q}','-f','per_page=1','--jq','.total_count'],
+        capture_output=True, text=True, timeout=30)
+    return int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
+
+merged = search_count('repo:{owner}/{repo} is:pr is:merged merged:>{cutoff_date}')
+closed = search_count('repo:{owner}/{repo} is:pr is:closed closed:>{cutoff_date}')
+landed = closed - merged
+
+if landed > 3 * max(merged, 1):
+    print(f'WORKFLOW=non-standard  MERGED={merged}  CLOSED={closed}  LANDED={landed}')
+    print(f'This repo uses a land-and-close workflow ({landed} landed vs {merged} merged). Use --state closed.')
+elif merged > 1000:
+    print(f'WORKFLOW=high-volume  MERGED={merged}  CLOSED={closed}')
+    print(f'Merged PR count exceeds Search API 1000-cap. Remove --search flag, filter by date locally.')
+else:
+    print(f'WORKFLOW=standard  MERGED={merged}  CLOSED={closed}')
+"
+```
+
+Use the output to decide which fetch path to follow:
+- `WORKFLOW=non-standard` → **Step 1A**
+- `WORKFLOW=high-volume` → **Step 1B**
+- `WORKFLOW=standard` → **Step 1C**
+
+**Step 1A — Non-standard workflow** (land-and-close repos like pytorch):
+
+Fetch closed PRs (the primary contribution path) and merged PRs (the small fraction merged via GitHub). **Do NOT use `--search`** — it uses the Search API which caps at 1000 results. The commands below use GraphQL pagination with no cap:
+
+```bash
+gh pr list --repo {owner}/{repo} --state closed --limit 20000 \
+  --json number,author,closedAt > {workdir}/raw-prs.json
+```
+
+```bash
+gh pr list --repo {owner}/{repo} --state merged --limit 5000 \
+  --json number,author,mergedAt > {workdir}/raw-merged-prs.json
+```
+
+Both files are combined and deduplicated in Step 2.
+
+**Step 1B — High-volume standard** (>1000 merged PRs, e.g., vllm):
+
+Fetch all merged PRs **without `--search`** to avoid the 1000-result Search API cap:
+
+```bash
+gh pr list --repo {owner}/{repo} --state merged --limit 20000 \
+  --json number,author,mergedAt > {workdir}/raw-prs.json
+```
+
+**Step 1C — Standard** (<=1000 merged PRs):
+
+```bash
+gh pr list --repo {owner}/{repo} --state merged --limit 5000 \
+  --json number,author,mergedAt > {workdir}/raw-prs.json
+```
+
+**Step 2 — Roster matching** (all workflows):
+
+Match PRs against the employee roster via python3. For non-standard workflows, this combines closed and merged PR lists and identifies Red Hat candidates:
+
+```bash
+python3 -c "
+import json, os
+
 roster = json.load(open('{roster_path}'))
-prs = json.load(open('{workdir}/raw-prs.json'))
 gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+
+# Load primary PR list
+prs = json.load(open('{workdir}/raw-prs.json'))
+
+# If non-standard workflow, also load merged PRs and combine
+if os.path.exists('{workdir}/raw-merged-prs.json'):
+    merged = json.load(open('{workdir}/raw-merged-prs.json'))
+    seen = {pr['number'] for pr in prs}
+    prs.extend([pr for pr in merged if pr['number'] not in seen])
+
+# Filter by date — use whichever date field is present
+prs = [pr for pr in prs if
+    (pr.get('mergedAt') or pr.get('closedAt') or '') >= '{cutoff_date}']
+
+# Exclude bot authors
+bot_names = {'pytorchmergebot','pytorchupdatebot','facebook-github-bot',
+             'github-actions','dependabot','renovate','mergify'}
+prs = [pr for pr in prs if not (
+    pr.get('author',{}).get('login','').endswith('[bot]') or
+    pr.get('author',{}).get('login','').lower() in bot_names)]
+
 total = len(prs)
-rh_prs = {}
+rh_candidates = {}
 for pr in prs:
     login = pr.get('author',{}).get('login','').lower()
     if login in gh_users:
         emp = gh_users[login]
-        rh_prs.setdefault(login, {'name': emp['name'], 'tier': emp.get('github_resolution_tier',1), 'count': 0})
-        rh_prs[login]['count'] += 1
-rh_total = sum(v['count'] for v in rh_prs.values())
+        rh_candidates.setdefault(login, {'name': emp['name'],
+            'tier': emp.get('github_resolution_tier',1), 'prs': []})
+        rh_candidates[login]['prs'].append(pr['number'])
+
+rh_total = sum(len(v['prs']) for v in rh_candidates.values())
 pct = round(rh_total/total*100,1) if total else 0
-print(f'Total merged PRs: {total}')
-print(f'Red Hat authored: {rh_total} ({pct}%)')
-if total >= 10000: print('WARNING: Result limit reached, data may be incomplete')
-for login, info in sorted(rh_prs.items(), key=lambda x:-x[1]['count']):
-    print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {info['count']} PRs\")
+print(f'Total human PRs in window: {total}')
+print(f'RH candidate PRs: {rh_total} ({pct}%)')
+
+# Write candidate PR numbers for verification (non-standard workflow)
+json.dump({login: info['prs'] for login, info in rh_candidates.items()},
+    open('{workdir}/rh-candidate-prs.json','w'))
+
+for login, info in sorted(rh_candidates.items(), key=lambda x:-len(x[1]['prs'])):
+    print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {len(info['prs'])} candidate PRs\")
 print(f'Resolution coverage: {roster[\"resolution_coverage_pct\"]}%')
 "
 ```
 
-**Step 3:** Check co-authored commits:
+**Step 2b — Landing verification** (non-standard workflow only — skip for standard/high-volume):
+
+For non-standard workflows, closed PRs are only "candidates" — they may have been abandoned rather than landed. Verify each RH-candidate closed PR has a closing commit reference (proving it was landed). PRs with `mergedAt` set are automatically verified.
+
+```bash
+python3 -c "
+import json, subprocess, os
+
+candidates = json.load(open('{workdir}/rh-candidate-prs.json'))
+roster = json.load(open('{roster_path}'))
+gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
+
+# Load PRs to check which have mergedAt (auto-verified) vs closedAt only
+prs_by_num = {}
+for f in ['{workdir}/raw-prs.json', '{workdir}/raw-merged-prs.json']:
+    if os.path.exists(f):
+        for pr in json.load(open(f)):
+            prs_by_num[pr['number']] = pr
+
+verified = {}
+unverified = {}
+
+for login, pr_numbers in candidates.items():
+    verified[login] = 0
+    unverified[login] = []
+    for num in pr_numbers:
+        pr = prs_by_num.get(num, {})
+        if pr.get('mergedAt'):
+            verified[login] += 1
+            continue
+        # Check closing event for commit reference
+        result = subprocess.run(
+            ['gh', 'api', f'repos/{owner}/{repo}/issues/{num}/events',
+             '--jq', '[.[] | select(.event==\"closed\") | .commit_id // empty] | length'],
+            capture_output=True, text=True, timeout=30)
+        has_commit = int(result.stdout.strip()) > 0 if result.stdout.strip().isdigit() else False
+        if has_commit:
+            verified[login] += 1
+        else:
+            unverified[login].append(num)
+
+rh_total = sum(verified.values())
+print(f'Verified RH PR contributions: {rh_total}')
+for login in sorted(verified, key=lambda x:-verified[x]):
+    if verified[login] == 0:
+        continue
+    emp = gh_users.get(login, {})
+    name = emp.get('name', login) if isinstance(emp, dict) else login
+    tier = emp.get('github_resolution_tier', 1) if isinstance(emp, dict) else 1
+    dropped = len(unverified.get(login, []))
+    note = f' ({dropped} unverified/abandoned dropped)' if dropped else ''
+    print(f\"  {name} (@{login}, Tier {tier}): {verified[login]} verified PRs{note}\")
+"
+```
+
+This verification step makes at most N API calls where N = total RH-candidate closed PRs (typically <100). PRs closed without a commit reference are excluded as abandoned/rejected.
+
+**Step 3 — Co-authored commits:**
 ```bash
 gh api "repos/{owner}/{repo}/commits?per_page=100&since={cutoff_date}T00:00:00Z" --paginate \
   --jq '.[].commit.message' > {workdir}/raw-commit-messages.txt
 grep -i "co-authored-by" {workdir}/raw-commit-messages.txt | sort | uniq -c | sort -rn | head -20
 ```
 
-**Scoring:** SCORING: 5=>=30%, 4=20-29%, 3=10-19%, 2=1-9%, 1=0%
+**Step 4 — Confidence annotation:**
 
-**Checkpoint:** Write complete KPI 1 results to `{workdir}/kpi1-pr-contributions.md` using the Write tool. Include: total PRs, RH count/pct, per-employee table (Employee | GitHub | Tier | PRs | Confidence), score, evidence URLs.
+Add to the checkpoint output:
+- If non-standard workflow: `"NOTE: This project uses a non-standard PR workflow where PRs are landed via bot (closed, not merged through GitHub). Each RH-attributed PR was verified to have a closing commit reference confirming it was landed on the default branch."`
+- If high-volume: `"NOTE: Merged PR count exceeds GitHub Search API 1000-result cap. Full dataset fetched via GraphQL pagination (no --search flag)."`
+- Confidence is **High** for all paths: data source is GitHub API (authoritative), non-standard workflow PRs are individually verified, and no sampling or estimation is used.
+
+**Scoring:** 5=>=30%, 4=20-29%, 3=10-19%, 2=1-9%, 1=0%
+
+**Checkpoint:** Write complete KPI 1 results to `{workdir}/kpi1-pr-contributions.md` using the Write tool. Include: total PRs, RH count/pct, per-employee table (Employee | GitHub | Tier | PRs | Confidence), score, evidence URLs, workflow detection result, and any applicable workflow notes.
 
 Return: `"KPI 1 complete. {rh_count}/{total} PRs ({pct}%). Score: {score}. File: {workdir}/kpi1-pr-contributions.md"`
 

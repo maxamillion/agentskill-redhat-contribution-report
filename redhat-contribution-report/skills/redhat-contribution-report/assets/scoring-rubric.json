@@ -141,7 +141,8 @@
       "high": "Data from authoritative source: GitHub API (PRs, releases, commits), governance files committed to the repository (OWNERS, CODEOWNERS, MAINTAINERS).",
       "medium": "Data from semi-structured sources: release notes text, project documentation, README references, foundation governance pages.",
       "low": "Data from web search results or unstructured sources. May be outdated or inaccurate.",
-      "not_found": "Could not find data for this metric. The absence of data does not necessarily mean absence of contribution."
+      "not_found": "Could not find data for this metric. The absence of data does not necessarily mean absence of contribution.",
+      "incomplete_data": "Data collection method could not retrieve complete results. The Search API 1000-result cap was reached, or the project uses a non-standard merge workflow. Metrics may be based on a subset of contributions. Confidence is downgraded to Medium if not mitigated by an alternative collection method."
     },
     "composition_rule": "Final confidence = min(resolution_confidence, data_confidence). A finding is only as reliable as its weakest link. For example, a Tier 3 (Low) username resolution caps all findings for that employee at Low confidence, regardless of data source quality.",
     "final_confidence_matrix": {
@@ -159,5 +160,11 @@
   "coverage_thresholds": {
     "warning_below_pct": 70,
     "warning_message": "GitHub username resolution coverage is below 70%. Contribution metrics may undercount Red Hat involvement."
+  },
+  "workflow_detection": {
+    "non_standard_threshold": "If closed-not-merged PRs exceed 3x merged PRs, the project uses a non-standard merge workflow (e.g., pytorchmergebot). Use --state closed instead of --state merged.",
+    "high_volume_threshold": "If merged PR count exceeds 1000, the GitHub Search API cap will truncate results. Remove --search flag and filter by date locally.",
+    "search_api_cap": 1000,
+    "note": "The gh pr list --search flag uses GitHub's Search API which has a hard cap of 1000 results. The --limit parameter cannot exceed this. Use gh pr list without --search (GraphQL pagination) for repos exceeding this threshold."
   }
 }

@@ -225,15 +225,17 @@ For each KPI prompt template, prepare the prompt by substituting:
 
 **Do NOT substitute `{employee_roster}` or embed the roster inline.** Sub-agents access the roster file via `{roster_path}` inside python3 scripts. The roster is never loaded into agent conversation context.
 
-**Launch 5 Task sub-agents per project, ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose` and `max_turns: 8` for each. For N projects, this means 5N Task calls in a single message.
+**Launch 5 Task sub-agents per project, ALL IN PARALLEL in a single message.** Use `subagent_type: general-purpose`. For N projects, this means 5N Task calls in a single message.
 
-| Agent | KPI | Focus |
-|-------|-----|-------|
-| KPI 1 | PR/Commit Contributions | PRs, commits, code contributions authored or co-authored by roster employees |
-| KPI 2 | Release Management | Release managers who are roster employees |
-| KPI 3 | Maintainer/Reviewer/Approver Roles | Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files |
-| KPI 4 | Roadmap Influence | Enhancement proposals, roadmap features, or design docs led by roster employees |
-| KPI 5 | Leadership Roles | TAC, steering committee, advisory board, or other governance body positions held by roster employees |
+| Agent | KPI | Focus | max_turns |
+|-------|-----|-------|-----------|
+| KPI 1 | PR/Commit Contributions | PRs, commits, code contributions authored or co-authored by roster employees | 12 |
+| KPI 2 | Release Management | Release managers who are roster employees | 8 |
+| KPI 3 | Maintainer/Reviewer/Approver Roles | Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files | 8 |
+| KPI 4 | Roadmap Influence | Enhancement proposals, roadmap features, or design docs led by roster employees | 8 |
+| KPI 5 | Leadership Roles | TAC, steering committee, advisory board, or other governance body positions held by roster employees | 8 |
+
+KPI 1 agents get `max_turns: 12` because workflow detection and larger PR fetches for high-volume or non-standard repos require additional API round-trips. All other KPIs use `max_turns: 8`.
 
 Each agent writes its results to a checkpoint file in `{workdir}/` and returns only a 1-line status message. This keeps orchestrator context minimal.
 

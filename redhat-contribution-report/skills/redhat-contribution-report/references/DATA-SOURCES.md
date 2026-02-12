@@ -8,17 +8,80 @@ All time-series queries use `{cutoff_date}` (a `YYYY-MM-DD` date 6 months before
 
 Time-series KPIs (1, 2, 4) use date-filtered queries. Current-state KPIs (3, 5) query governance files and leadership positions without date filtering, as these represent point-in-time snapshots. Username resolution (Task 1) intentionally searches all-time history to maximize coverage.
 
+## Workflow Detection & Search API Limitations
+
+### GitHub Search API 1000-Result Cap
+
+The `gh pr list --search` flag uses GitHub's Search API, which has a **hard cap of 1000 results** regardless of the `--limit` parameter. Setting `--limit 10000` will still return at most 1000 results when `--search` is used.
+
+In contrast, `gh pr list` **without `--search`** uses GitHub's GraphQL `pullRequests` connection, which supports full pagination with no cap.
+
+**Rule:** Never use `--search` for repositories that may have more than 1000 PRs in the evaluation window. Instead, fetch all PRs via `gh pr list` (GraphQL) and filter by date locally in python.
+
+### Non-Standard Merge Workflows
+
+Some projects use a "land-and-close" workflow where a bot (e.g., pytorch's `pytorchmergebot`) lands commits directly onto the default branch and then **closes** the PR rather than merging it through GitHub's merge button. In these repos, `--state merged` misses the vast majority of contributions.
+
+**Detection:** Compare merged vs closed PR counts via the Search API:
+
+```bash
+python3 -c "
+import subprocess, json
+
+def search_count(q):
+    r = subprocess.run(['gh','api','search/issues','-X','GET',
+        '-f',f'q={q}','-f','per_page=1','--jq','.total_count'],
+        capture_output=True, text=True, timeout=30)
+    return int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
+
+merged = search_count('repo:{owner}/{repo} is:pr is:merged merged:>{cutoff_date}')
+closed = search_count('repo:{owner}/{repo} is:pr is:closed closed:>{cutoff_date}')
+landed = closed - merged
+
+if landed > 3 * max(merged, 1):
+    print('WORKFLOW=non-standard — use --state closed')
+elif merged > 1000:
+    print('WORKFLOW=high-volume — remove --search, filter by date locally')
+else:
+    print('WORKFLOW=standard')
+"
+```
+
+**Decision rules:**
+- `non-standard`: Fetch `--state closed` PRs (plus `--state merged` for the small fraction merged via GitHub). Verify closed PRs were actually landed by checking for closing commit references.
+- `high-volume`: Fetch `--state merged` PRs without `--search` to avoid the 1000-cap.
+- `standard`: Fetch `--state merged` PRs without `--search` for consistency.
+
+### Commit-Based Landing Verification
+
+For non-standard workflow repos, verify a closed PR was actually landed (not abandoned) by checking its closing events for a commit reference:
+
+```bash
+gh api repos/{owner}/{repo}/issues/{pr_number}/events \
+  --jq '[.[] | select(.event=="closed") | .commit_id // empty] | length'
+```
+
+A non-zero result means the PR was closed by a commit landing on the default branch (i.e., it was landed, not abandoned).
+
 ## KPI 1: PR/Commit Contributions
 
 ### Bulk PR List (Preferred - avoids per-author rate limit pressure)
 
-Fetch all recent merged PRs for a repository and filter locally:
+Fetch all merged PRs for a repository and filter by date locally in python. **Never use `--search`** for repos with >1000 results — the Search API caps at 1000:
 
 ```bash
-gh pr list --repo {owner}/{repo} --state merged --limit 10000 \
-  --search "merged:>{cutoff_date}" \
+gh pr list --repo {owner}/{repo} --state merged --limit 5000 \
   --json number,title,author,mergedAt,url
 ```
+
+For non-standard workflow repos, also fetch closed PRs:
+
+```bash
+gh pr list --repo {owner}/{repo} --state closed --limit 20000 \
+  --json number,title,author,closedAt,url
+```
+
+Filter by date in python after fetching (e.g., `mergedAt >= cutoff_date` or `closedAt >= cutoff_date`).
 
 Cross-reference the `author.login` field against the employee roster GitHub usernames.
 
