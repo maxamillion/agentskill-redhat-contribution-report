@@ -18,22 +18,28 @@ The skill runs a 7-phase sequential workflow orchestrated by SKILL.md:
 2. **LDAP traversal** — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`); writes roster to `reports/tmp/employee-roster.json`
 3. **Resolution summary** — report LDAP-resolved (Tier 1) vs unresolved employees
 3.5. **Centralized username resolution** — single dedicated sub-agent resolves GitHub usernames across all target projects; updates roster JSON in place
-4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message (KPI 1 uses `max_turns: 15`; KPIs 2-5 use `max_turns: 8`)
+4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message (all use `max_turns: 8`)
 5. **Result collection** — read 5 checkpoint files per project from `reports/tmp/{owner}-{repo}/`; no inline roster merging needed
 6. **Report generation** — markdown report to `reports/YYYY-MM-DD-redhat-contribution-eval.md`
 
-Sub-agents evaluate 5 KPIs per project: PR contributions, release management, maintainership, roadmap influence, and governance leadership roles. The employee roster is externalized to a JSON file (`reports/tmp/employee-roster.json`) — sub-agents access it via `{roster_path}` inside python3 scripts, keeping it out of agent conversation context. Each agent returns a 1-line status and writes detailed results to checkpoint files. Prompt templates are in `references/RESEARCH-PROMPTS.md` with `{owner}`, `{repo}`, and `{roster_path}` placeholders.
+Sub-agents evaluate 5 KPIs per project: PR contributions, release management, maintainership, roadmap influence, and governance leadership roles. The employee roster is externalized to a JSON file (`reports/tmp/employee-roster.json`) — sub-agents access it via `{roster_path}` inside python3 scripts, keeping it out of agent conversation context. Each agent returns a 1-line status and writes detailed results to checkpoint files. Prompt templates are in `references/RESEARCH-PROMPTS.md` with `{owner}`, `{repo}`, `{roster_path}`, and `{assets_dir}` placeholders.
+
+Heavy computation (workflow detection, PR analysis with verification, governance file scanning, batch username resolution) is offloaded to standalone Python scripts in `assets/`. Sub-agent prompts reference these scripts by path (`{assets_dir}/script.py`), keeping prompts lean and minimizing context window usage.
 
 ## Key Files
 
 | File | Role |
 |------|------|
 | `SKILL.md` | Orchestrator — phases, LDAP queries, sub-agent dispatch |
-| `references/RESEARCH-PROMPTS.md` | Sub-agent prompt template (all 5 KPIs + output schema) |
+| `references/RESEARCH-PROMPTS.md` | Sub-agent prompt templates (lean — reference external scripts) |
 | `references/LDAP-GUIDE.md` | LDAP server, attributes, traversal algorithm |
 | `references/DATA-SOURCES.md` | `gh` CLI commands by KPI |
 | `references/REPORT-TEMPLATE.md` | Output format with per-employee role tables |
 | `assets/scoring-rubric.json` | 1-5 scoring thresholds and confidence level definitions |
+| `assets/kpi1-workflow-detect.py` | Standalone script: detect standard/non-standard/high-volume PR workflow |
+| `assets/kpi1-pr-analysis.py` | Standalone script: PR roster matching + non-standard workflow verification |
+| `assets/username-batch-resolve.py` | Standalone script: batch git-email search + gh search confirmation |
+| `assets/governance-file-scanner.py` | Standalone script: batch governance file fetch + roster matching (KPI 3 & 5) |
 
 ## Plugin Structure
 
