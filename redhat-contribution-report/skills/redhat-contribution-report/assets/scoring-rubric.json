@@ -162,7 +162,7 @@
     "warning_message": "GitHub username resolution coverage is below 70%. Contribution metrics may undercount Red Hat involvement."
   },
   "workflow_detection": {
-    "non_standard_threshold": "If closed-not-merged PRs exceed 3x merged PRs, the project uses a non-standard merge workflow (e.g., pytorchmergebot). Use --state closed instead of --state merged.",
+    "non_standard_threshold": "If closed-not-merged PRs exceed 3x merged PRs AND merged >= 50 AND landed >= 100, the project uses a non-standard merge workflow (e.g., pytorchmergebot). Repos below these thresholds are treated as standard even if the ratio is high, preventing false positives on low-activity repos with many abandoned PRs.",
     "high_volume_threshold": "If merged PR count exceeds 1000, the GitHub Search API cap will truncate results. Remove --search flag and filter by date locally.",
     "search_api_cap": 1000,
     "note": "The gh pr list --search flag uses GitHub's Search API which has a hard cap of 1000 results. The --limit parameter cannot exceed this. Use gh pr list without --search (GraphQL pagination) for repos exceeding this threshold."

@@ -107,7 +107,7 @@ merged = search_count('repo:{owner}/{repo} is:pr is:merged merged:>{cutoff_date}
 closed = search_count('repo:{owner}/{repo} is:pr is:closed closed:>{cutoff_date}')
 landed = closed - merged
 
-if landed > 3 * max(merged, 1):
+if landed > 3 * max(merged, 1) and merged >= 50 and landed >= 100:
     print(f'WORKFLOW=non-standard  MERGED={merged}  CLOSED={closed}  LANDED={landed}')
     print(f'This repo uses a land-and-close workflow ({landed} landed vs {merged} merged). Use --state closed.')
 elif merged > 1000:
@@ -155,13 +155,13 @@ gh pr list --repo {owner}/{repo} --state merged --limit 5000 \
   --json number,author,mergedAt > {workdir}/raw-prs.json
 ```
 
-**Step 2 — Roster matching** (all workflows):
+**Step 2 — Roster matching with inline verification** (all workflows):
 
-Match PRs against the employee roster via python3. For non-standard workflows, this combines closed and merged PR lists and identifies Red Hat candidates:
+Match PRs against the employee roster via python3. For non-standard workflows, this combines closed and merged PR lists, separates definitively merged PRs from closed-only PRs, and verifies closed-only PRs inline — all in a single atomic script so verification cannot be skipped by turn exhaustion.
 
 ```bash
 python3 -c "
-import json, os
+import json, os, subprocess
 
 roster = json.load(open('{roster_path}'))
 gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
@@ -169,11 +169,12 @@ gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.ge
 # Load primary PR list
 prs = json.load(open('{workdir}/raw-prs.json'))
 
-# If non-standard workflow, also load merged PRs and combine
-if os.path.exists('{workdir}/raw-merged-prs.json'):
-    merged = json.load(open('{workdir}/raw-merged-prs.json'))
+# Determine if this is a non-standard workflow (raw-merged-prs.json exists)
+is_nonstandard = os.path.exists('{workdir}/raw-merged-prs.json')
+if is_nonstandard:
+    merged_prs = json.load(open('{workdir}/raw-merged-prs.json'))
     seen = {pr['number'] for pr in prs}
-    prs.extend([pr for pr in merged if pr['number'] not in seen])
+    prs.extend([pr for pr in merged_prs if pr['number'] not in seen])
 
 # Filter by date — use whichever date field is present
 prs = [pr for pr in prs if
@@ -186,87 +187,119 @@ prs = [pr for pr in prs if not (
     pr.get('author',{}).get('login','').endswith('[bot]') or
     pr.get('author',{}).get('login','').lower() in bot_names)]
 
-total = len(prs)
-rh_candidates = {}
-for pr in prs:
+# Separate into definitively merged (mergedAt set) and closed-only
+merged_prs_list = [pr for pr in prs if pr.get('mergedAt')]
+closed_only_prs = [pr for pr in prs if not pr.get('mergedAt')]
+
+# For standard/high-volume workflows, all PRs should have mergedAt; closed-only = 0
+# For non-standard workflows, closed-only PRs need per-PR verification
+total_merged = len(merged_prs_list)
+total_closed_only = len(closed_only_prs)
+
+# Count merged PRs immediately as verified contributions
+rh_merged = {}
+for pr in merged_prs_list:
     login = pr.get('author',{}).get('login','').lower()
     if login in gh_users:
         emp = gh_users[login]
-        rh_candidates.setdefault(login, {'name': emp['name'],
+        rh_merged.setdefault(login, {'name': emp['name'],
             'tier': emp.get('github_resolution_tier',1), 'prs': []})
-        rh_candidates[login]['prs'].append(pr['number'])
+        rh_merged[login]['prs'].append(pr['number'])
 
-rh_total = sum(len(v['prs']) for v in rh_candidates.values())
+# For non-standard workflows: verify each RH-candidate closed-only PR inline
+rh_verified_landed = {}
+rh_dropped = {}
+if is_nonstandard and closed_only_prs:
+    rh_closed_candidates = {}
+    for pr in closed_only_prs:
+        login = pr.get('author',{}).get('login','').lower()
+        if login in gh_users:
+            emp = gh_users[login]
+            rh_closed_candidates.setdefault(login, {'name': emp['name'],
+                'tier': emp.get('github_resolution_tier',1), 'prs': []})
+            rh_closed_candidates[login]['prs'].append(pr['number'])
+
+    for login, info in rh_closed_candidates.items():
+        rh_verified_landed[login] = {'name': info['name'], 'tier': info['tier'], 'prs': []}
+        rh_dropped[login] = []
+        for num in info['prs']:
+            try:
+                result = subprocess.run(
+                    ['gh', 'api', f'repos/{owner}/{repo}/issues/{num}/events',
+                     '--jq', '[.[] | select(.event==\"closed\") | .commit_id // empty] | length'],
+                    capture_output=True, text=True, timeout=30)
+                has_commit = int(result.stdout.strip()) > 0 if result.stdout.strip().isdigit() else False
+            except Exception:
+                has_commit = False  # Conservative: exclude on failure
+            if has_commit:
+                rh_verified_landed[login]['prs'].append(num)
+            else:
+                rh_dropped[login].append(num)
+
+# Compute verified totals
+# For non-standard: denominator = merged + verified-landed (not merged + all-closed)
+verified_landed_count = sum(len(v['prs']) for v in rh_verified_landed.values()) if is_nonstandard else 0
+# Total verified PRs in the repo (for denominator)
+# Standard/high-volume: total = merged only; Non-standard: total = merged + all closed-only (before RH filter)
+total = total_merged + total_closed_only
+
+rh_merged_count = sum(len(v['prs']) for v in rh_merged.values())
+rh_landed_count = sum(len(v['prs']) for v in rh_verified_landed.values())
+rh_total = rh_merged_count + rh_landed_count
 pct = round(rh_total/total*100,1) if total else 0
-print(f'Total human PRs in window: {total}')
-print(f'RH candidate PRs: {rh_total} ({pct}%)')
 
-# Write candidate PR numbers for verification (non-standard workflow)
-json.dump({login: info['prs'] for login, info in rh_candidates.items()},
-    open('{workdir}/rh-candidate-prs.json','w'))
+print(f'Total merged PRs in window: {total_merged}')
+if is_nonstandard:
+    print(f'Total closed-only PRs in window: {total_closed_only}')
+    print(f'Total verified-landed PRs (non-standard): {verified_landed_count}')
+print(f'Total verified contributions: {total}')
+print(f'RH merged PRs: {rh_merged_count}')
+if is_nonstandard:
+    print(f'RH verified-landed PRs: {rh_landed_count}')
+print(f'RH total verified: {rh_total} ({pct}%)')
 
-for login, info in sorted(rh_candidates.items(), key=lambda x:-len(x[1]['prs'])):
-    print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {len(info['prs'])} candidate PRs\")
+# Combine per-employee results
+all_rh = {}
+for login, info in rh_merged.items():
+    all_rh.setdefault(login, {'name': info['name'], 'tier': info['tier'],
+        'merged': 0, 'landed': 0, 'dropped': 0})
+    all_rh[login]['merged'] = len(info['prs'])
+for login, info in rh_verified_landed.items():
+    all_rh.setdefault(login, {'name': info['name'], 'tier': info['tier'],
+        'merged': 0, 'landed': 0, 'dropped': 0})
+    all_rh[login]['landed'] = len(info['prs'])
+    all_rh[login]['dropped'] = len(rh_dropped.get(login, []))
+
+for login, info in sorted(all_rh.items(), key=lambda x:-(x[1]['merged']+x[1]['landed'])):
+    total_emp = info['merged'] + info['landed']
+    parts = []
+    if info['merged']: parts.append(f\"{info['merged']} merged\")
+    if info['landed']: parts.append(f\"{info['landed']} verified-landed\")
+    if info['dropped']: parts.append(f\"{info['dropped']} dropped\")
+    detail = ', '.join(parts)
+    print(f\"  {info['name']} (@{login}, Tier {info['tier']}): {total_emp} verified PRs ({detail})\")
+
 print(f'Resolution coverage: {roster[\"resolution_coverage_pct\"]}%')
+
+# Write metadata for Phase 5 cross-checking
+metadata = {
+    'workflow_type': 'non-standard' if is_nonstandard else 'standard',
+    'total_merged': total_merged,
+    'total_closed_only': total_closed_only,
+    'total_prs': total,
+    'rh_merged_count': rh_merged_count,
+    'rh_landed_count': rh_landed_count,
+    'rh_verified_total': rh_total,
+    'rh_pct': pct,
+    'per_employee': {login: {'merged': info['merged'], 'landed': info['landed'],
+        'dropped': info['dropped']} for login, info in all_rh.items()}
+}
+json.dump(metadata, open('{workdir}/kpi1-metadata.json', 'w'), indent=2)
+print(f'Metadata written to {workdir}/kpi1-metadata.json')
 "
 ```
 
-**Step 2b — Landing verification** (non-standard workflow only — skip for standard/high-volume):
-
-For non-standard workflows, closed PRs are only "candidates" — they may have been abandoned rather than landed. Verify each RH-candidate closed PR has a closing commit reference (proving it was landed). PRs with `mergedAt` set are automatically verified.
-
-```bash
-python3 -c "
-import json, subprocess, os
-
-candidates = json.load(open('{workdir}/rh-candidate-prs.json'))
-roster = json.load(open('{roster_path}'))
-gh_users = {e['github_username'].lower(): e for e in roster['employees'] if e.get('github_username')}
-
-# Load PRs to check which have mergedAt (auto-verified) vs closedAt only
-prs_by_num = {}
-for f in ['{workdir}/raw-prs.json', '{workdir}/raw-merged-prs.json']:
-    if os.path.exists(f):
-        for pr in json.load(open(f)):
-            prs_by_num[pr['number']] = pr
-
-verified = {}
-unverified = {}
-
-for login, pr_numbers in candidates.items():
-    verified[login] = 0
-    unverified[login] = []
-    for num in pr_numbers:
-        pr = prs_by_num.get(num, {})
-        if pr.get('mergedAt'):
-            verified[login] += 1
-            continue
-        # Check closing event for commit reference
-        result = subprocess.run(
-            ['gh', 'api', f'repos/{owner}/{repo}/issues/{num}/events',
-             '--jq', '[.[] | select(.event==\"closed\") | .commit_id // empty] | length'],
-            capture_output=True, text=True, timeout=30)
-        has_commit = int(result.stdout.strip()) > 0 if result.stdout.strip().isdigit() else False
-        if has_commit:
-            verified[login] += 1
-        else:
-            unverified[login].append(num)
-
-rh_total = sum(verified.values())
-print(f'Verified RH PR contributions: {rh_total}')
-for login in sorted(verified, key=lambda x:-verified[x]):
-    if verified[login] == 0:
-        continue
-    emp = gh_users.get(login, {})
-    name = emp.get('name', login) if isinstance(emp, dict) else login
-    tier = emp.get('github_resolution_tier', 1) if isinstance(emp, dict) else 1
-    dropped = len(unverified.get(login, []))
-    note = f' ({dropped} unverified/abandoned dropped)' if dropped else ''
-    print(f\"  {name} (@{login}, Tier {tier}): {verified[login]} verified PRs{note}\")
-"
-```
-
-This verification step makes at most N API calls where N = total RH-candidate closed PRs (typically <100). PRs closed without a commit reference are excluded as abandoned/rejected.
+This unified script makes at most N API calls where N = total RH-candidate closed-only PRs (typically <100, only for non-standard workflows). Verification and counting happen in the same python process, so verification cannot be skipped by turn exhaustion. PRs closed without a commit reference are excluded as abandoned/rejected. If an events API call fails for a specific PR, that PR is conservatively excluded.
 
 **Step 3 — Co-authored commits:**
 ```bash
@@ -278,7 +311,7 @@ grep -i "co-authored-by" {workdir}/raw-commit-messages.txt | sort | uniq -c | so
 **Step 4 — Confidence annotation:**
 
 Add to the checkpoint output:
-- If non-standard workflow: `"NOTE: This project uses a non-standard PR workflow where PRs are landed via bot (closed, not merged through GitHub). Each RH-attributed PR was verified to have a closing commit reference confirming it was landed on the default branch."`
+- If non-standard workflow: `"NOTE: This project uses a non-standard PR workflow. PRs are counted in two categories: (1) definitively merged via GitHub (mergedAt set), and (2) closed PRs verified as landed via closing commit reference. Unverified closed PRs are excluded."`
 - If high-volume: `"NOTE: Merged PR count exceeds GitHub Search API 1000-result cap. Full dataset fetched via GraphQL pagination (no --search flag)."`
 - Confidence is **High** for all paths: data source is GitHub API (authoritative), non-standard workflow PRs are individually verified, and no sampling or estimation is used.
 

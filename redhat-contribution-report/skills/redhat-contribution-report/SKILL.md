@@ -229,13 +229,13 @@ For each KPI prompt template, prepare the prompt by substituting:
 
 | Agent | KPI | Focus | max_turns |
 |-------|-----|-------|-----------|
-| KPI 1 | PR/Commit Contributions | PRs, commits, code contributions authored or co-authored by roster employees | 12 |
+| KPI 1 | PR/Commit Contributions | PRs, commits, code contributions authored or co-authored by roster employees | 15 |
 | KPI 2 | Release Management | Release managers who are roster employees | 8 |
 | KPI 3 | Maintainer/Reviewer/Approver Roles | Roster employees in OWNERS, CODEOWNERS, MAINTAINERS, or similar governance files | 8 |
 | KPI 4 | Roadmap Influence | Enhancement proposals, roadmap features, or design docs led by roster employees | 8 |
 | KPI 5 | Leadership Roles | TAC, steering committee, advisory board, or other governance body positions held by roster employees | 8 |
 
-KPI 1 agents get `max_turns: 12` because workflow detection and larger PR fetches for high-volume or non-standard repos require additional API round-trips. All other KPIs use `max_turns: 8`.
+KPI 1 agents get `max_turns: 15` because workflow detection, larger PR fetches, and inline landing verification for non-standard repos require additional API round-trips. All other KPIs use `max_turns: 8`.
 
 Each agent writes its results to a checkpoint file in `{workdir}/` and returns only a 1-line status message. This keeps orchestrator context minimal.
 
@@ -277,6 +277,47 @@ for i, f in enumerate(kpi_files, 1):
         print(f'KPI {i}: checkpoint missing')
 "
 ```
+
+#### §5.0 KPI 1 Spot-Check (Non-Standard Workflows)
+
+For each project, check if a `kpi1-metadata.json` file exists in the working directory:
+
+```bash
+python3 -c "
+import json, os, subprocess
+
+workdir = 'reports/tmp/{owner}-{repo}'
+meta_path = os.path.join(workdir, 'kpi1-metadata.json')
+if not os.path.exists(meta_path):
+    print('No kpi1-metadata.json found — skipping spot-check')
+    exit(0)
+
+metadata = json.load(open(meta_path))
+print(f'Workflow type: {metadata[\"workflow_type\"]}')
+print(f'RH verified total (metadata): {metadata[\"rh_verified_total\"]}')
+
+# Read the checkpoint file to extract the reported RH PR count
+checkpoint_path = os.path.join(workdir, 'kpi1-pr-contributions.md')
+if os.path.exists(checkpoint_path):
+    content = open(checkpoint_path).read()
+    print(f'Checkpoint file exists: yes')
+else:
+    print('WARNING: kpi1-pr-contributions.md checkpoint missing')
+
+if metadata['workflow_type'] == 'non-standard':
+    print(f'Non-standard workflow detected — cross-validation active')
+    print(f'  Merged: {metadata[\"rh_merged_count\"]}, Landed: {metadata[\"rh_landed_count\"]}')
+    print(f'  Total verified: {metadata[\"rh_verified_total\"]} ({metadata[\"rh_pct\"]}%)')
+"
+```
+
+If the workflow type is `non-standard`, spot-check 2-3 individual PRs from the top RH contributor by verifying their merge status:
+
+```bash
+gh pr view {pr_number} --repo {owner}/{repo} --json state,mergedAt,closedAt,number
+```
+
+If the checkpoint file's reported RH PR count diverges from `metadata.rh_verified_total`, flag it for manual review and add a note to the Data Quality section of the report.
 
 #### §5.1 KPI Result Aggregation
 

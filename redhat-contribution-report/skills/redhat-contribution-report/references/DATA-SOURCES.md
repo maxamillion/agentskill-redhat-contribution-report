@@ -38,7 +38,7 @@ merged = search_count('repo:{owner}/{repo} is:pr is:merged merged:>{cutoff_date}
 closed = search_count('repo:{owner}/{repo} is:pr is:closed closed:>{cutoff_date}')
 landed = closed - merged
 
-if landed > 3 * max(merged, 1):
+if landed > 3 * max(merged, 1) and merged >= 50 and landed >= 100:
     print('WORKFLOW=non-standard — use --state closed')
 elif merged > 1000:
     print('WORKFLOW=high-volume — remove --search, filter by date locally')
@@ -48,9 +48,11 @@ else:
 ```
 
 **Decision rules:**
-- `non-standard`: Fetch `--state closed` PRs (plus `--state merged` for the small fraction merged via GitHub). Verify closed PRs were actually landed by checking for closing commit references.
+- `non-standard`: Fetch `--state closed` PRs (plus `--state merged` for the small fraction merged via GitHub). Verification of closed PRs happens inline during roster matching — each closed-only RH-candidate PR is checked for a closing commit reference in the same python process that does counting, ensuring verification cannot be skipped.
 - `high-volume`: Fetch `--state merged` PRs without `--search` to avoid the 1000-cap.
 - `standard`: Fetch `--state merged` PRs without `--search` for consistency.
+
+**False-positive warning:** Low-activity repos with many abandoned PRs can trigger false non-standard detection. The minimum thresholds (merged >= 50, landed >= 100) prevent this. Repos below these thresholds use the standard `--state merged` path even if the closed-to-merged ratio is high.
 
 ### Commit-Based Landing Verification
 
