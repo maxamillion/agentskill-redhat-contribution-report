@@ -191,4 +191,40 @@ Use this template to generate the final evaluation report. Replace all `{placeho
 ## Sources
 
 {List all URLs, files, and commands used as evidence throughout the report}
+
+---
+
+## Audit Results
+
+**Audit Date:** {YYYY-MM-DD}
+**Validation Status:** {PASS / PASS WITH WARNINGS / DISCREPANCIES FOUND}
+
+### Validation Summary
+
+| Category | Checks | Pass | Warnings | Discrepancies |
+|----------|--------|------|----------|---------------|
+| Employee Attribution | {n} | {n} | {n} | {n} |
+| Score Consistency | {n} | {n} | {n} | {n} |
+| Confidence Levels | {n} | {n} | {n} | {n} |
+| Data Cross-Reference | {n} | {n} | {n} | {n} |
+| Spot-Checks | {n} | {n} | {n} | {n} |
+| **Total** | **{n}** | **{n}** | **{n}** | **{n}** |
+
+{If discrepancies found, include:}
+
+### Discrepancies
+
+| # | Category | Expected | Actual | Detail |
+|---|----------|----------|--------|--------|
+| 1 | {category} | {expected value} | {actual value} | {explanation} |
+
+{If warnings found, include:}
+
+### Unverifiable Claims
+
+{List claims that could not be independently verified, with explanation of why verification was not possible.}
+
+### Methodology
+
+Automated validation performed by `audit-validate.py` with targeted `gh` CLI spot-checks against live GitHub data. The audit cross-references the report against checkpoint files, the scoring rubric, and the employee roster to verify attribution accuracy, score consistency, and confidence level compliance.
 ```

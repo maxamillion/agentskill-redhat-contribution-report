@@ -18,6 +18,7 @@ Evaluate Red Hat employee contributions to one or more open source projects by:
 3. Centralizing GitHub username resolution via a dedicated sub-agent
 4. Dispatching 5 parallel KPI sub-agents per project (one per KPI)
 5. Generating a consolidated markdown report from checkpoint files
+6. Running a final audit to validate report accuracy against checkpoints and live data
 
 ## Quick Start
 
@@ -360,12 +361,34 @@ Generate the final report by:
    ```
    Use the Write tool to save the report.
 
-5. Clean up intermediate files:
+### Phase 7: Final Audit
+
+Run a final validation of the generated report against checkpoint files, the scoring rubric, and live GitHub data.
+
+1. Read the Auditor Agent prompt template from `references/RESEARCH-PROMPTS.md`.
+
+2. Prepare the prompt by substituting:
+   - `{report_path}` with the report file path from Phase 6 (e.g., `reports/YYYY-MM-DD-redhat-contribution-eval.md`)
+   - `{roster_path}` with `reports/tmp/employee-roster.json`
+   - `{workdir}` with `reports/tmp`
+   - `{assets_dir}` with the absolute path to `redhat-contribution-report/skills/redhat-contribution-report/assets`
+   - `{projects}` with a comma-separated list of all target projects (e.g., `kubeflow/kubeflow,kserve/kserve`)
+
+3. Launch a single `Task` sub-agent with `subagent_type: general-purpose` and `max_turns: 10`.
+
+4. Wait for the agent to complete. Report the audit results to the user:
+   - If PASS: note that all checks passed
+   - If PASS WITH WARNINGS: list the warnings
+   - If DISCREPANCIES FOUND: list each discrepancy with expected vs. actual values
+
+### Cleanup
+
+1. Clean up intermediate files:
    ```bash
    rm -rf reports/tmp/
    ```
 
-6. Inform the user of the report location and summarize key findings.
+2. Inform the user of the report location and summarize key findings.
 
 ## Error Handling
 

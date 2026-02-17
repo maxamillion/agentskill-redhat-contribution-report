@@ -1,6 +1,6 @@
 # Sub-Agent Prompt Templates
 
-Six prompt templates: one **Username Resolution Agent** (centralized, runs once) and five **KPI Agents** (one per KPI per project, all launched in parallel). Replace `{owner}`, `{repo}`, `{cutoff_date}`, `{workdir}`, `{roster_path}`, and `{assets_dir}` with actual values before dispatching.
+Seven prompt templates: one **Username Resolution Agent** (centralized, runs once), five **KPI Agents** (one per KPI per project, all launched in parallel), and one **Auditor Agent** (final validation). Replace `{owner}`, `{repo}`, `{cutoff_date}`, `{workdir}`, `{roster_path}`, and `{assets_dir}` with actual values before dispatching.
 
 **Key invariants for all agents:**
 - `{roster_path}` appears ONLY inside `python3` script arguments or `python3 -c` strings — never as an argument to the Read tool
@@ -260,5 +260,50 @@ for name, body, role in governance_members:
 **Checkpoint:** Write KPI 5 results to `{workdir}/kpi5-leadership.md` using the Write tool. Include: governance bodies found, RH positions table (Employee | GitHub | Tier | Body | Role | Source | Confidence), score, evidence.
 
 Return: `"KPI 5 complete. {rh_leadership_count} RH employees in leadership positions. Score: {score}. File: {workdir}/kpi5-leadership.md"`
+
+### PROMPT END
+
+---
+
+## Auditor Agent
+
+### PROMPT START
+
+You validate the final Red Hat contribution report against checkpoint files, the scoring rubric, and live GitHub data.
+
+**REPORT:** {report_path} | **ROSTER:** {roster_path} | **WORKDIR:** {workdir} | **PROJECTS:** {projects}
+
+**Step 1 — Batch validation:**
+```bash
+python3 {assets_dir}/audit-validate.py --report {report_path} --roster {roster_path} --workdir {workdir} --rubric {assets_dir}/scoring-rubric.json --projects "{projects}"
+```
+
+**Step 2 — Spot-checks:** Read `{workdir}/audit-results.json`. Execute each command in the `spot_check_targets` list (up to 4) using `gh` CLI. Record whether the live result matches, contradicts, or is inconclusive against the report's claims. Classify each as pass/warning/discrepancy.
+
+**Step 3 — Write audit report** to `{workdir}/audit-report.md` using the Write tool. Include:
+- Summary table of all validation checks
+- Detailed discrepancy explanations with expected vs. actual values
+- Spot-check results with full command output
+- Any warnings about unverifiable claims
+
+**Step 4 — Append audit summary to main report.** Read the report at `{report_path}`. Append an `## Audit Results` section at the end with:
+- Audit Date and overall Validation Status (PASS / PASS WITH WARNINGS / DISCREPANCIES FOUND)
+- Summary table:
+
+| Category | Checks | Pass | Warnings | Discrepancies |
+|----------|--------|------|----------|---------------|
+| Employee Attribution | {n} | {n} | {n} | {n} |
+| Score Consistency | {n} | {n} | {n} | {n} |
+| Confidence Levels | {n} | {n} | {n} | {n} |
+| Data Cross-Reference | {n} | {n} | {n} | {n} |
+| Spot-Checks | {n} | {n} | {n} | {n} |
+
+- If discrepancies exist, list each with expected vs. actual values
+- If warnings exist, list unverifiable claims
+- Methodology note: "Automated validation via audit-validate.py with targeted gh CLI spot-checks"
+
+Write the updated report back to `{report_path}` using the Write tool.
+
+Return: `"Audit complete. {total_checks} checks: {passes} pass, {warnings} warnings, {discrepancies} discrepancies. File: {workdir}/audit-report.md"`
 
 ### PROMPT END
