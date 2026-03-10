@@ -1,6 +1,6 @@
 ---
 name: redhat-contribution-report
-description: Evaluates Red Hat's contribution to open source projects by identifying employees under a given manager via LDAP and measuring their GitHub contributions, maintainership, governance roles, and roadmap influence. Use when evaluating Red Hat employee contributions, organizational engagement, or open source investment for one or more projects. Supports multiple projects in a single evaluation run.
+description: Evaluates contributions to open source projects by building a contributor roster from Red Hat LDAP org traversal, a GitHub organization's member list, or both, then measuring GitHub contributions, maintainership, governance roles, and roadmap influence. Supports multiple projects in a single evaluation run.
 license: MIT
 compatibility: Requires RHEL or Fedora Linux with access to Red Hat internal LDAP (ldap.corp.redhat.com), a valid Kerberos ticket, and authenticated gh CLI.
 metadata:
@@ -12,28 +12,54 @@ allowed-tools: Bash(gh:*) Bash(ldapsearch:*) Bash(klist:*) Bash(git log:*) Bash(
 
 # Red Hat Open Source Contribution Evaluation
 
-Evaluate Red Hat employee contributions to one or more open source projects by:
-1. Traversing Red Hat's internal LDAP to find all employees under a given org leader
+Evaluate contributions to one or more open source projects by:
+1. Building a contributor roster from LDAP org traversal, GitHub org members, or both
 2. Writing the employee roster to a JSON file for sub-agent consumption
-3. Centralizing GitHub username resolution via a dedicated sub-agent
+3. Centralizing GitHub username resolution via a dedicated sub-agent (LDAP mode)
 4. Dispatching 5 parallel KPI sub-agents per project (one per KPI)
 5. Generating a consolidated markdown report from checkpoint files
 6. Running a final audit to validate report accuracy against checkpoints and live data
 
 ## Quick Start
 
+**LDAP only** (Red Hat manager email):
 ```
-/redhat-contribution-report shuels@redhat.com kubeflow/kubeflow kserve/kserve mlflow/mlflow vllm-project/vllm
+/redhat-contribution-report shuels@redhat.com kubeflow/kubeflow kserve/kserve
+```
+
+**GitHub org only:**
+```
+/redhat-contribution-report kserve kserve/kserve kubeflow/kubeflow
+```
+
+**Both** (LDAP + GitHub org):
+```
+/redhat-contribution-report shuels@redhat.com kserve kubeflow/kubeflow kserve/kserve
 ```
 
 ## Input Format
 
 ```
-$ARGUMENTS = <manager_email> <project1> [project2] [project3] ...
+$ARGUMENTS = [manager_email] [github_org] <project1> [project2] [project3] ...
 ```
 
-- **manager_email** (required): Email address of the org leader to scope the LDAP search (e.g., `shuels@redhat.com`)
+Arguments are classified by pattern — no flags needed:
+- Contains `@` → `manager_email` (LDAP org leader email)
+- Contains `/` → `project` (GitHub `owner/repo`)
+- Otherwise → `github_org` (validated via `gh api orgs/{name}`)
+
+At least one of `manager_email` or `github_org` must be present, plus at least one project.
+
+- **manager_email** (optional): Email address of the org leader to scope the LDAP search (e.g., `shuels@redhat.com`)
+- **github_org** (optional): GitHub organization name (e.g., `kserve`). Members become the contributor roster.
 - **projects** (required, one or more): GitHub repositories in `owner/repo` format. If only a project name is given (e.g., `kubeflow`), attempt to resolve it via `gh search repos`
+
+**Three modes:**
+| Mode | Arguments | Roster Source |
+|------|-----------|---------------|
+| LDAP only | `email project...` | Red Hat LDAP org tree |
+| GitHub org only | `org project...` | GitHub org member list |
+| Both | `email org project...` | LDAP + GitHub org (merged, deduplicated) |
 
 ## Evaluation Workflow
 
@@ -41,35 +67,51 @@ Execute these phases sequentially. Do not skip phases.
 
 ### Phase 1: Input Parsing & Prerequisites
 
-1. Parse `$ARGUMENTS` to extract:
-   - `manager_email`: The first argument (must contain `@`)
-   - `projects`: All remaining arguments
+1. Parse `$ARGUMENTS` by classifying each argument:
+   - Contains `@` → `manager_email`
+   - Contains `/` → add to `projects` list
+   - Otherwise → candidate `github_org` (validate below)
 
-2. If any project lacks an `owner/` prefix, resolve it:
+   At least one of `manager_email` or `github_org` must be present, plus at least one project.
+
+2. **Validate candidate `github_org`** (if present):
+   ```bash
+   gh api orgs/{github_org} --jq '.login'
+   ```
+   If 404, this is not a valid org — treat it as a bare project name and attempt repo search instead.
+
+3. If any project lacks an `owner/` prefix, resolve it:
    ```bash
    gh search repos "{project_name}" --limit 5 --json fullName,description,stargazersCount
    ```
    Select the most likely match and confirm with the user.
 
-3. Run prerequisite checks (all must pass before continuing):
+4. Determine the **mode** and print a summary:
+   - `manager_email` only → **LDAP only** mode
+   - `github_org` only → **GitHub org only** mode
+   - Both → **LDAP + GitHub org** mode
 
-   **Kerberos ticket:**
+   Print: `Mode: {mode} | Manager: {email or "none"} | Org: {org or "none"} | Projects: {list}`
+
+5. Run prerequisite checks:
+
+   **GitHub CLI authentication** (always required):
+   ```bash
+   gh auth status
+   ```
+   If not authenticated, stop and tell the user to run `gh auth login`.
+
+   **Kerberos ticket** (only if `manager_email` is present):
    ```bash
    klist
    ```
    If no valid TGT, stop and tell the user to run `kinit`.
 
-   **LDAP connectivity:**
+   **LDAP connectivity** (only if `manager_email` is present):
    ```bash
    ldapsearch -LLL -Y GSSAPI -H ldap://ldap.corp.redhat.com -b ou=users,dc=redhat,dc=com '(mail=MANAGER_EMAIL)' uid cn 2>&1 | head -5
    ```
    If this fails, warn the user. Refer to `references/LDAP-GUIDE.md` for the fallback strategy.
-
-   **GitHub CLI authentication:**
-   ```bash
-   gh auth status
-   ```
-   If not authenticated, stop and tell the user to run `gh auth login`.
 
    **Validate each project exists:**
    ```bash
@@ -83,6 +125,28 @@ Execute these phases sequentially. Do not skip phases.
    ```
 
 ### Phase 2: LDAP Organization Enumeration
+
+**Conditional:** Skip this phase entirely if no `manager_email` was provided. When skipped, create the initial roster JSON:
+```bash
+mkdir -p reports/tmp
+```
+Then use the Write tool to save an empty roster to `reports/tmp/employee-roster.json`:
+```json
+{
+  "generated_at": "YYYY-MM-DDTHH:MM:SSZ",
+  "manager": null,
+  "roster_source": "github-org",
+  "total_employees": 0,
+  "resolved_count": 0,
+  "resolution_coverage_pct": 0.0,
+  "employees": []
+}
+```
+Then skip directly to Phase 2.5.
+
+---
+
+**When `manager_email` is present**, proceed with LDAP enumeration:
 
 Refer to `references/LDAP-GUIDE.md` for detailed LDAP query patterns and attribute documentation.
 
@@ -146,6 +210,7 @@ All LDAP queries MUST use GSSAPI authentication (`-Y GSSAPI`). Never use simple 
    {
      "generated_at": "YYYY-MM-DDTHH:MM:SSZ",
      "manager": {"name": "...", "uid": "...", "email": "..."},
+     "roster_source": "ldap",
      "total_employees": 125,
      "resolved_count": 40,
      "resolution_coverage_pct": 32.0,
@@ -158,28 +223,57 @@ All LDAP queries MUST use GSSAPI authentication (`-Y GSSAPI`). Never use simple 
          "github_username": "janedoe",
          "github_resolution_method": "ldap",
          "github_resolution_tier": 1,
-         "depth": 2
+         "depth": 2,
+         "source": "ldap"
        }
      ]
    }
    ```
    - Set `github_resolution_tier` to `1` for LDAP-resolved usernames, `null` for unresolved
    - Set `github_username` to `null` for employees without LDAP resolution
+   - Set `roster_source` to `"ldap"` (will become `"both"` if Phase 2.5 merges GitHub org members)
+   - Set `source` to `"ldap"` on each employee entry
    - This file is the single source of truth for the roster — sub-agents reference it by path and never receive the roster inline
+
+### Phase 2.5: GitHub Organization Roster
+
+**Conditional:** Skip this phase if no `github_org` was provided.
+
+Run the GitHub org roster script to fetch org members and build (or merge into) the roster:
+
+```bash
+python3 {assets_dir}/github-org-roster.py \
+  --org {github_org} \
+  --output reports/tmp/employee-roster.json \
+  {--merge if Phase 2 already wrote the file (i.e., manager_email was present)}
+```
+
+Use `--merge` when both `manager_email` and `github_org` are present (LDAP + GitHub org mode). The script will:
+- Fetch all org members via `gh api orgs/{org}/members --paginate`
+- Enrich each member with profile data via `gh api users/{login}`
+- In merge mode: match by `github_username` (case-insensitive), mark matches as `source: "both"`, append new members as `source: "github-org"`, keep LDAP-only entries as `source: "ldap"`
+- In standalone mode: create a fresh roster with `roster_source: "github-org"`, `manager: null`
+- Update `total_employees`, `resolved_count`, `resolution_coverage_pct`
+
+Report the roster size and source mode to the user after this phase completes.
 
 ### Phase 3: GitHub Username Resolution Summary
 
-Review the roster JSON written in Phase 2 (`reports/tmp/employee-roster.json`):
+Review the roster JSON (`reports/tmp/employee-roster.json`):
 - Employees with GitHub usernames from LDAP are marked as **Tier 1 (High confidence)** (`github_resolution_tier: 1`)
+- Employees from GitHub org membership also have **Tier 1** (`github_resolution_tier: 1`) with `github_resolution_method: "github-org"`
 - Employees without GitHub usernames (`github_username: null`) will be resolved by the centralized Username Resolution Agent in Phase 3.5
 
-Report the current resolution state to the user before proceeding. Include:
-- Total employees, resolved count, coverage percentage
-- Note that Phase 3.5 will attempt to resolve remaining employees before KPI evaluation begins
+Report the current resolution state to the user, adapted for the active mode:
+- **LDAP only:** Total employees, resolved count, coverage %, note Phase 3.5 resolution
+- **GitHub org only:** Total members, 100% username coverage, no Phase 3.5 needed
+- **Both:** Total employees (LDAP + org), overlap count, combined coverage %
 
 ### Phase 3.5: Centralized Username Resolution
 
-Launch a **single** dedicated sub-agent to resolve GitHub usernames for all employees who lack LDAP-resolved usernames. This runs once before KPI evaluation, so all KPI agents benefit from the same resolved roster.
+**Conditional:** Skip this phase if all employees already have GitHub usernames resolved (e.g., GitHub-org-only mode where 100% have usernames). Check the roster: if zero employees have `github_username: null`, skip to Phase 4.
+
+When active, launch a **single** dedicated sub-agent to resolve GitHub usernames for employees who lack resolved usernames. In combined mode, only LDAP-sourced employees without usernames need resolution. This runs once before KPI evaluation, so all KPI agents benefit from the same resolved roster.
 
 Read the Username Resolution Agent prompt template from `references/RESEARCH-PROMPTS.md`.
 
@@ -392,11 +486,13 @@ Run a final validation of the generated report against checkpoint files, the sco
 
 ## Error Handling
 
-- **Kerberos/LDAP failure:** Warn user. Offer email-only fallback (search git history for `@redhat.com`). All metrics marked reduced confidence. No org scoping possible.
+- **Kerberos/LDAP failure:** Warn user. Offer email-only fallback (search git history for `@redhat.com`). All metrics marked reduced confidence. No org scoping possible. Only applies when `manager_email` is present.
+- **GitHub org not found (404):** Treat the argument as a bare project name and attempt repo search.
+- **GitHub org access denied (403):** Warn user that private org membership requires org membership or admin token.
 - **gh rate limited (403):** Reduce sample sizes by 50%. Note in Data Quality section. If still limited, report partial data.
 - **Project not found:** Skip the project. Note in the report.
 - **Governance files not found:** Mark KPIs 3 and 5 as low confidence. Use web search as fallback.
-- **Org exceeds 500 employees:** Warn user. Suggest narrowing scope. Proceed only with confirmation.
+- **Org exceeds 500 employees (LDAP or GitHub):** Warn user. Suggest narrowing scope. Proceed only with confirmation.
 - **Coverage below 70%:** Add warning banner to all contribution metrics in the report.
 
 ## Reference Files

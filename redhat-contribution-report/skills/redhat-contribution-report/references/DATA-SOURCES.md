@@ -2,6 +2,34 @@
 
 All GitHub data collection uses the `gh` CLI tool exclusively. Never use raw API calls with curl or direct HTTP requests to avoid authentication token management.
 
+## Roster Building (GitHub Organization)
+
+When using a GitHub organization as a roster source, fetch org members and enrich with profile data:
+
+### Fetch Organization Members
+
+```bash
+gh api orgs/{org}/members --paginate --jq '.[].login'
+```
+
+Returns all public members of the organization. Private membership requires org membership or an admin-scoped token.
+
+### Fetch User Profile
+
+```bash
+gh api users/{login} --jq '{login: .login, name: .name, email: .email, company: .company, bio: .bio}'
+```
+
+Returns the user's public profile. The `email` field is only populated if the user has made it public. The `name` field may be null.
+
+### Validate Organization Exists
+
+```bash
+gh api orgs/{org} --jq '.login'
+```
+
+Returns the org login on success, 404 if not found.
+
 ## Evaluation Window
 
 All time-series queries use `{cutoff_date}` (a `YYYY-MM-DD` date 6 months before the evaluation date) to bound results to a consistent 6-month evaluation window. The `--limit` parameter is set high enough to capture all results within the date-filtered window. Date filtering is the sole mechanism for scoping results.

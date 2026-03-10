@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Claude Code AgentSkill marketplace plugin that evaluates Red Hat employee contributions to open source projects. It uses LDAP for org discovery, `gh` CLI for GitHub data, and parallel sub-agents for per-project analysis.
+A Claude Code AgentSkill marketplace plugin that evaluates contributions to open source projects. It builds contributor rosters from Red Hat LDAP org discovery, GitHub organization membership, or both. Uses `gh` CLI for GitHub data and parallel sub-agents for per-project analysis.
 
 ## Skill Entry Point
 
@@ -12,16 +12,19 @@ A Claude Code AgentSkill marketplace plugin that evaluates Red Hat employee cont
 
 ## Architecture
 
-The skill runs an 8-phase sequential workflow orchestrated by SKILL.md:
+The skill runs a 9-phase sequential workflow orchestrated by SKILL.md:
 
-1. **Input parsing** — manager email + project list from `$ARGUMENTS`
-2. **LDAP traversal** — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`); writes roster to `reports/tmp/employee-roster.json`
-3. **Resolution summary** — report LDAP-resolved (Tier 1) vs unresolved employees
-3.5. **Centralized username resolution** — single dedicated sub-agent resolves GitHub usernames across all target projects; updates roster JSON in place
+1. **Input parsing** — classify args by pattern: `@` = manager email, `/` = project, bare = GitHub org
+2. **LDAP traversal** *(conditional, requires manager_email)* — BFS walk of Red Hat's LDAP tree using GSSAPI auth (`-Y GSSAPI`, never `-x`); writes roster to `reports/tmp/employee-roster.json`
+2.5. **GitHub org roster** *(conditional, requires github_org)* — fetch org members via `gh api`, enrich profiles, write/merge roster JSON
+3. **Resolution summary** — report resolved vs unresolved employees (adapted for source mode)
+3.5. **Centralized username resolution** *(conditional, skip if all resolved)* — single dedicated sub-agent resolves GitHub usernames across all target projects; updates roster JSON in place
 4. **Parallel KPI agents** — 5 `Task` sub-agents per project (one per KPI), all 5N launched in a single message (all use `max_turns: 8`)
 5. **Result collection** — read 5 checkpoint files per project from `reports/tmp/{owner}-{repo}/`; no inline roster merging needed
 6. **Report generation** — markdown report to `reports/YYYY-MM-DD-redhat-contribution-eval.md`
 7. **Final audit** — single sub-agent validates report accuracy against checkpoints, scoring rubric, and live GitHub API spot-checks
+
+Three input modes: LDAP only (`email projects...`), GitHub org only (`org projects...`), or both (`email org projects...`). Phases 2, 2.5, and 3.5 are conditional based on which roster sources are active.
 
 Sub-agents evaluate 5 KPIs per project: PR contributions, release management, maintainership, roadmap influence, and governance leadership roles. The employee roster is externalized to a JSON file (`reports/tmp/employee-roster.json`) — sub-agents access it via `{roster_path}` inside python3 scripts, keeping it out of agent conversation context. Each agent returns a 1-line status and writes detailed results to checkpoint files. Prompt templates are in `references/RESEARCH-PROMPTS.md` with `{owner}`, `{repo}`, `{roster_path}`, and `{assets_dir}` placeholders.
 
@@ -41,6 +44,7 @@ Heavy computation (workflow detection, PR analysis with verification, governance
 | `assets/kpi1-pr-analysis.py` | Standalone script: PR roster matching + non-standard workflow verification |
 | `assets/username-batch-resolve.py` | Standalone script: batch git-email search + gh search confirmation |
 | `assets/governance-file-scanner.py` | Standalone script: batch governance file fetch + roster matching (KPI 3 & 5) |
+| `assets/github-org-roster.py` | Standalone script: fetch GitHub org members, enrich profiles, build/merge roster |
 | `assets/audit-validate.py` | Standalone script: batch report validation against checkpoints, rubric, and roster |
 
 ## Plugin Structure
@@ -51,13 +55,24 @@ This is a marketplace-distributable plugin. The manifests are:
 
 ## Prerequisites for Testing
 
-Requires Red Hat internal network (VPN), valid Kerberos ticket (`kinit`), `openldap-clients` package, and authenticated `gh` CLI.
+Authenticated `gh` CLI is always required. LDAP mode additionally requires Red Hat internal network (VPN), valid Kerberos ticket (`kinit`), and `openldap-clients` package.
 
 ```bash
+# LDAP mode prerequisites
 klist
 ldapsearch -LLL -Y GSSAPI -H ldap://ldap.corp.redhat.com -b ou=users,dc=redhat,dc=com '(mail=shuels@redhat.com)' uid cn
+
+# Always required
 gh auth status
+
+# LDAP only
 /redhat-contribution-report shuels@redhat.com kubeflow/kubeflow kserve/kserve
+
+# GitHub org only (no LDAP/Kerberos needed)
+/redhat-contribution-report kserve kserve/kserve kubeflow/kubeflow
+
+# Both (LDAP + GitHub org)
+/redhat-contribution-report shuels@redhat.com kserve kubeflow/kubeflow kserve/kserve
 ```
 
 ## Constraints
